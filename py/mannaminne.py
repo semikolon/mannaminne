@@ -51,6 +51,15 @@ EMBED_BATCH_SIZE = _env_int("MANNAMINNE_EMBED_BATCH_SIZE", 4)
 EMBED_WORKERS = _env_int("MANNAMINNE_EMBED_WORKERS", 2)
 EMBED_SELECT_LIMIT = _env_int("MANNAMINNE_EMBED_SELECT_LIMIT", 500)
 EMBED_MAX_CHARS = _env_int("MANNAMINNE_EMBED_MAX_CHARS", 750)
+# Embedding real session/doc text on the Darwin GTX 1650 runs at ~2 chunks/sec
+# (a 4B model, no tensor cores). The Z4 RTX A4000 is ~5-15x faster but is only
+# intermittently available. Two knobs keep nightly runs polite + resumable:
+#   - EMBED_MAX_SECONDS: stop after a time budget (loop commits per select-batch,
+#     so progress persists and the next run resumes). 0 = unlimited (manual runs).
+#   - Z4_COOLDOWN_SECS: after the Z4 tunnel fails, skip re-probing it this long.
+EMBED_MAX_SECONDS = _env_float("MANNAMINNE_EMBED_MAX_SECONDS", 0.0, min_value=0.0)
+Z4_COOLDOWN_SECS = _env_int("MANNAMINNE_Z4_COOLDOWN_SECS", 1800)
+Z4_COOLDOWN_FILE = os.path.join(HOME, ".cache/mannaminne/z4-cooldown")
 CHUNK_SIZE = _env_int("MANNAMINNE_CHUNK_SIZE", 750)          # chars (~250 tokens for prose)
 CHUNK_OVERLAP = _env_int("MANNAMINNE_CHUNK_OVERLAP", 80)     # keeps boundary needles visible
 MAX_CHUNKS = _env_int("MANNAMINNE_MAX_CHUNKS", 400)          # per non-doc source object
@@ -275,51 +284,93 @@ _NOISE = ("<system-reminder>", "This session is being continued", "Caveat:",
           "# CLAUDE.md", "Codebase and user instructions are shown below",
           "<command-name>", "<local-command-stdout>", "DO NOT respond to these")
 
+class SourceUnavailable(Exception):
+    """A source's storage location is temporarily inaccessible (e.g. an external
+    volume is unmounted). Raised so cmd_ingest SKIPS the kind without running the
+    orphan-prune that would otherwise wipe its chunks from the index."""
+
+
+def _volume_available(path: str) -> bool:
+    """For /Volumes/<vol>/... paths the volume must be mounted; all other paths
+    are always 'available'."""
+    parts = Path(path).parts
+    if len(parts) >= 3 and parts[1] == "Volumes":
+        return os.path.ismount(os.path.join("/Volumes", parts[2]))
+    return True
+
+
+def _session_paths():
+    """CC transcript roots, live first. Live = ~/.claude/projects (recent);
+    FERMI archive = older sessions moved off the small internal SSD by
+    nightly-sweep. Both are scanned so archived sessions stay indexed; source_id
+    is keyed on the session UUID, so a session present in both dedups at upsert.
+    Override with MANNAMINNE_SESSION_PATHS (os.pathsep-separated, live first)."""
+    default = os.pathsep.join([
+        os.path.join(HOME, ".claude/projects"),
+        "/Volumes/FERMI/MacMini-archives additions/claude-sessions-archive",
+    ])
+    return [p for p in os.environ.get("MANNAMINNE_SESSION_PATHS", default).split(os.pathsep)
+            if p.strip()]
+
+
 def discover_sessions():
     """CC transcripts, noise-filtered: keep human + assistant natural-language
-    text; drop tool calls, injected CLAUDE.md, system reminders, huge boilerplate."""
-    for f in glob.glob(os.path.join(HOME, ".claude/projects/*/*.jsonl")):
-        if "subagent" in f:
-            continue
-        sid = Path(f).stem
-        proj = Path(f).parent.name.rsplit("-", 1)[-1]
-        parts, created = [], ""
-        try:
-            fh = open(f, encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        with fh:
-            for line in fh:
-                try:
-                    o = json.loads(line)
-                except Exception:
-                    continue
-                if o.get("isCompactSummary"):
-                    continue
-                typ = o.get("type")
-                if typ not in ("user", "assistant"):
-                    continue
-                if not created:
-                    created = (o.get("timestamp") or "")[:10]
-                msg = o.get("message") or {}
-                cont = msg.get("content")
-                texts = []
-                if isinstance(cont, str):
-                    texts = [cont]
-                elif isinstance(cont, list):
-                    texts = [b.get("text", "") for b in cont
-                             if isinstance(b, dict) and b.get("type") == "text"]
-                for t in texts:
-                    if not t or len(t) > 12000:        # skip giant boilerplate dumps
+    text; drop tool calls, injected CLAUDE.md, system reminders, huge boilerplate.
+    Scans live + FERMI-archive roots (see _session_paths). If a configured
+    external root's volume is unmounted, raises SourceUnavailable so ingest skips
+    sessions WITHOUT pruning the index (the volume is temporarily gone, not the
+    data)."""
+    paths = _session_paths()
+    for base in paths:
+        if not _volume_available(base):
+            raise SourceUnavailable(f"session source volume unmounted: {base}")
+    seen_sids = set()
+    for base in paths:
+        for f in sorted(glob.glob(os.path.join(base, "*/*.jsonl"))):
+            if "subagent" in f:
+                continue
+            sid = Path(f).stem
+            if sid in seen_sids:   # same session in live + archive → index once (live wins)
+                continue
+            seen_sids.add(sid)
+            proj = Path(f).parent.name.rsplit("-", 1)[-1]
+            parts, created = [], ""
+            try:
+                fh = open(f, encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            with fh:
+                for line in fh:
+                    try:
+                        o = json.loads(line)
+                    except Exception:
                         continue
-                    if any(mark in t for mark in _NOISE):
+                    if o.get("isCompactSummary"):
                         continue
-                    parts.append(f"{typ}: {t}")
-        full = "\n".join(parts).strip()
-        if not full:
-            continue
-        title = (parts[0][:80] if parts else sid)
-        yield from _rows("session", f"session:{sid}", proj, title, full, created)
+                    typ = o.get("type")
+                    if typ not in ("user", "assistant"):
+                        continue
+                    if not created:
+                        created = (o.get("timestamp") or "")[:10]
+                    msg = o.get("message") or {}
+                    cont = msg.get("content")
+                    texts = []
+                    if isinstance(cont, str):
+                        texts = [cont]
+                    elif isinstance(cont, list):
+                        texts = [b.get("text", "") for b in cont
+                                 if isinstance(b, dict) and b.get("type") == "text"]
+                    for t in texts:
+                        if not t or len(t) > 12000:        # skip giant boilerplate dumps
+                            continue
+                        if any(mark in t for mark in _NOISE):
+                            continue
+                        parts.append(f"{typ}: {t}")
+            full = "\n".join(parts).strip()
+            if not full:
+                continue
+            title = (parts[0][:80] if parts else sid)
+            yield from _rows("session", f"session:{sid}", proj, title, full, created)
 
 # --- email (mbox: Gmail Takeout + curated subsets) --------------------------
 # Streaming parser — never loads the whole file (the Gmail Takeout is 4.7 GB).
@@ -622,27 +673,35 @@ def cmd_ingest(args):
     conn = load_conn()
     cur = conn.cursor()
     kinds = args.sources or list(ALL)
-    seen, total = [], 0
+    seen, total, completed_kinds = [], 0, []
     for kind in kinds:
         n, batch = 0, []
-        for row in ALL[kind]():
-            seen.append(row[0]); batch.append(row)
-            if len(batch) >= 500:
-                _upsert(cur, batch); conn.commit(); n += len(batch); batch = []
-        if batch:
-            _upsert(cur, batch); conn.commit(); n += len(batch)
+        try:
+            for row in ALL[kind]():
+                seen.append(row[0]); batch.append(row)
+                if len(batch) >= 500:
+                    _upsert(cur, batch); conn.commit(); n += len(batch); batch = []
+            if batch:
+                _upsert(cur, batch); conn.commit(); n += len(batch)
+        except SourceUnavailable as e:
+            conn.rollback()
+            print(f"  {kind}: SKIPPED — {e} (existing chunks preserved, NOT pruned)", flush=True)
+            continue
+        completed_kinds.append(kind)
         total += n
         print(f"  {kind}: {n} chunks upserted", flush=True)
-    # orphan cleanup: drop chunks of the processed kinds NOT produced this run
+    # orphan cleanup: drop chunks of the COMPLETED kinds NOT produced this run
     # (source object deleted, or shrank below a chunk_idx). Temp-table anti-join.
-    if seen:
+    # Kinds skipped via SourceUnavailable are excluded so an unmounted external
+    # volume never prunes its own index.
+    if seen and completed_kinds:
         cur.execute("CREATE TEMP TABLE _seen (id text)")
         with cur.copy("COPY _seen (id) FROM STDIN") as cp:
             for x in seen:
                 cp.write_row((x,))
         cur.execute("CREATE INDEX ON _seen (id)")
         cur.execute("DELETE FROM chunks WHERE source_kind = ANY(%s) "
-                    "AND NOT EXISTS (SELECT 1 FROM _seen s WHERE s.id = chunks.id)", (kinds,))
+                    "AND NOT EXISTS (SELECT 1 FROM _seen s WHERE s.id = chunks.id)", (completed_kinds,))
         pruned = cur.rowcount
         cur.execute("DROP TABLE _seen"); conn.commit()
         print(f"  pruned {pruned} orphaned chunks", flush=True)
@@ -680,16 +739,41 @@ def _post_embed(url, texts, timeout):
         data = json.loads(r.read())
     return [d["embedding"][:EMBED_DIM] for d in data["data"]]
 
+def _z4_in_cooldown():
+    """True if the Z4 tunnel failed recently and is still inside its cooldown."""
+    try:
+        with open(Z4_COOLDOWN_FILE) as fh:
+            return time.time() < float(fh.read().strip())
+    except Exception:
+        return False
+
+def _z4_set_cooldown():
+    try:
+        os.makedirs(os.path.dirname(Z4_COOLDOWN_FILE), exist_ok=True)
+        with open(Z4_COOLDOWN_FILE, "w") as fh:
+            fh.write(str(time.time() + Z4_COOLDOWN_SECS))
+    except Exception:
+        pass
+
+def _z4_clear_cooldown():
+    try:
+        os.remove(Z4_COOLDOWN_FILE)
+    except Exception:
+        pass
+
 def _embed_batch(texts):
     global _EMBED_URL_CACHE
     errors = []
     if EXPLICIT_EMBED_URL:
         candidates = [EXPLICIT_EMBED_URL]
     else:
-        # Prefer the Z4 tunnel whenever it is available. Even after a Darwin
-        # fallback, retry Z4 on the next call so a long embed run can migrate
-        # back as soon as the tunnel/server appears.
+        # Prefer the Z4 tunnel whenever available (much faster). After a Z4
+        # failure a file-based cooldown skips re-probing it for Z4_COOLDOWN_SECS,
+        # so a long Darwin run does not pay the probe timeout on every batch; the
+        # cooldown auto-expires so the run migrates back to Z4 once it returns.
         candidates = _embed_urls()
+        if _z4_in_cooldown():
+            candidates = [u for u in candidates if u != Z4_EMBED_URL] or candidates
     for url in candidates:
         try:
             if EXPLICIT_EMBED_URL or url == _EMBED_URL_CACHE or url == DARWIN_EMBED_URL:
@@ -698,9 +782,13 @@ def _embed_batch(texts):
                 timeout = EMBED_PROBE_TIMEOUT
             out = _post_embed(url, texts, timeout)
             _EMBED_URL_CACHE = url
+            if url == Z4_EMBED_URL:
+                _z4_clear_cooldown()
             return out
         except Exception as e:
             errors.append(f"{url}: {type(e).__name__}: {e}")
+            if url == Z4_EMBED_URL:
+                _z4_set_cooldown()
             if EXPLICIT_EMBED_URL:
                 break
             if url == _EMBED_URL_CACHE:
@@ -738,6 +826,7 @@ def cmd_embed(args):
     max_total = getattr(args, "limit", 0) if args else 0
     print(f"embedding: {pending} chunks pending", flush=True)
     done = 0
+    start = time.monotonic()
     while True:
         select_limit = EMBED_SELECT_LIMIT
         if max_total:
@@ -771,6 +860,10 @@ def cmd_embed(args):
         done += wrote
         print(f"  embedded ~{done}/{pending} (+{wrote})", flush=True)
         if max_total and done >= max_total:
+            break
+        if EMBED_MAX_SECONDS and (time.monotonic() - start) >= EMBED_MAX_SECONDS:
+            print(f"  time budget {EMBED_MAX_SECONDS:.0f}s reached — stopping "
+                  f"(committed progress persists; next run resumes)", flush=True)
             break
         if wrote == 0:
             # server ceded/down (idle-window guard not yet serving, or mid-cede) — wait politely

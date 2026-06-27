@@ -1,6 +1,8 @@
 import io
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -58,6 +60,11 @@ class EmbeddingTests(unittest.TestCase):
         m.EMBED_DIM = 3
         m.EMBED_PROBE_TIMEOUT = 0.5
         m.EMBED_TIMEOUT = 12.0
+        # Isolate the Z4 cooldown file so a real cooldown left by live embed runs
+        # doesn't make these Z4-preference tests skip Z4.
+        self._old_cooldown_file = m.Z4_COOLDOWN_FILE
+        m.Z4_COOLDOWN_FILE = os.path.join(tempfile.gettempdir(), "mannaminne-test-nocooldown")
+        m._z4_clear_cooldown()
 
     def tearDown(self):
         (
@@ -65,6 +72,7 @@ class EmbeddingTests(unittest.TestCase):
             m.DARWIN_EMBED_URL, m.EMBED_DIM, m.EMBED_PROBE_TIMEOUT,
             m.EMBED_TIMEOUT,
         ) = self.old
+        m.Z4_COOLDOWN_FILE = self._old_cooldown_file
 
     def test_embed_batch_prefers_z4_when_available(self):
         calls = []
@@ -160,6 +168,149 @@ class RankingAndEvalTests(unittest.TestCase):
         self.assertTrue(m._expectation_matches(result, "canonical"))
         self.assertTrue(m._expectation_matches(result, {"title": "CLAUDE.md", "project": "dotfiles"}))
         self.assertFalse(m._expectation_matches(result, {"title": "other"}))
+
+
+class SessionDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self._old_env = os.environ.get("MANNAMINNE_SESSION_PATHS")
+
+    def tearDown(self):
+        if self._old_env is None:
+            os.environ.pop("MANNAMINNE_SESSION_PATHS", None)
+        else:
+            os.environ["MANNAMINNE_SESSION_PATHS"] = self._old_env
+
+    @staticmethod
+    def _write_session(root, projdir, sid, user_text):
+        d = Path(root) / projdir
+        d.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({"type": "user", "timestamp": "2026-05-01T10:00:00Z",
+                           "message": {"content": user_text}})
+        (d / f"{sid}.jsonl").write_text(line + "\n", encoding="utf-8")
+
+    def test_session_paths_env_override_splits_pathsep_live_first(self):
+        os.environ["MANNAMINNE_SESSION_PATHS"] = f"/a/live{os.pathsep}/b/archive"
+        self.assertEqual(m._session_paths(), ["/a/live", "/b/archive"])
+
+    def test_discover_sessions_multi_path_dedup_live_wins(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as live, tempfile.TemporaryDirectory() as arch:
+            # same sid in both roots, different text → live must win
+            self._write_session(live, "proj-alpha", "dup-sid", "needle LIVE copy")
+            self._write_session(arch, "proj-alpha", "dup-sid", "needle ARCHIVE copy")
+            # archive-only session must still be discovered
+            self._write_session(arch, "proj-beta", "arch-only", "needle ARCHIVE only")
+            os.environ["MANNAMINNE_SESSION_PATHS"] = f"{live}{os.pathsep}{arch}"
+            rows = list(m.discover_sessions())
+            texts = " ".join(r[6] for r in rows)
+            self.assertIn("LIVE copy", texts)
+            self.assertNotIn("ARCHIVE copy", texts)          # dup deduped, live won
+            self.assertIn("ARCHIVE only", texts)             # archive-unique kept
+            sids = {r[2] for r in rows}
+            self.assertEqual(sids, {"session:dup-sid", "session:arch-only"})
+
+    def test_discover_sessions_raises_on_unmounted_volume(self):
+        os.environ["MANNAMINNE_SESSION_PATHS"] = "/Volumes/FERMI/claude-sessions-archive"
+        with mock.patch.object(m, "_volume_available", return_value=False):
+            with self.assertRaises(m.SourceUnavailable):
+                list(m.discover_sessions())
+
+    def test_volume_available_for_local_path_is_true(self):
+        self.assertTrue(m._volume_available("/Users/x/.claude/projects"))
+
+
+class IngestPruneSafetyTests(unittest.TestCase):
+    def test_unavailable_kind_skipped_and_excluded_from_prune(self):
+        recorded = []
+
+        class FakeCopy:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def write_row(self, _r): pass
+
+        class FakeCur:
+            rowcount = 0
+            def execute(self, sql, params=None): recorded.append((sql, params))
+            def executemany(self, sql, rows): recorded.append((sql, list(rows)))
+            def copy(self, _sql): return FakeCopy()
+
+        class FakeConn:
+            def cursor(self): return FakeCur()
+            def commit(self): pass
+            def rollback(self): pass
+
+        def raising():
+            raise m.SourceUnavailable("test unmount")
+            yield  # pragma: no cover — makes this a generator
+
+        def normal():
+            yield ("doc:one#0", "doc", "doc:one", 0, "proj", "T", "body", "", "hash")
+
+        args = type("A", (), {"sources": ["session", "doc"]})()
+        with mock.patch.object(m, "load_conn", return_value=FakeConn()), \
+             mock.patch.object(m, "ALL", {"session": raising, "doc": normal}):
+            m.cmd_ingest(args)
+
+        deletes = [(s, p) for (s, p) in recorded if isinstance(s, str) and s.startswith("DELETE FROM chunks")]
+        self.assertEqual(len(deletes), 1)
+        # prune scoped to the COMPLETED kind only — 'session' (unmounted) excluded
+        self.assertEqual(deletes[0][1], (["doc"],))
+
+
+class EmbedEndpointCooldownTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp()
+        self._old_file = m.Z4_COOLDOWN_FILE
+        self._old_cache = m._EMBED_URL_CACHE
+        m.Z4_COOLDOWN_FILE = os.path.join(self._tmp, "z4-cooldown")
+        m._EMBED_URL_CACHE = None
+
+    def tearDown(self):
+        m.Z4_COOLDOWN_FILE = self._old_file
+        m._EMBED_URL_CACHE = self._old_cache
+
+    def test_cooldown_set_clear_roundtrip(self):
+        self.assertFalse(m._z4_in_cooldown())
+        m._z4_set_cooldown()
+        self.assertTrue(m._z4_in_cooldown())
+        m._z4_clear_cooldown()
+        self.assertFalse(m._z4_in_cooldown())
+
+    def test_embed_batch_tries_z4_first_when_not_cooled(self):
+        if m.EXPLICIT_EMBED_URL:
+            self.skipTest("MANNAMINNE_EMBED_URL set in env")
+        m._z4_clear_cooldown()
+        calls = []
+        with mock.patch.object(m, "_post_embed",
+                               side_effect=lambda url, texts, timeout: (calls.append(url), [[0.0]] * len(texts))[1]):
+            m._embed_batch(["x"])
+        self.assertEqual(calls[0], m.Z4_EMBED_URL)   # Z4 probed first
+
+    def test_embed_batch_skips_z4_when_in_cooldown(self):
+        if m.EXPLICIT_EMBED_URL:
+            self.skipTest("MANNAMINNE_EMBED_URL set in env")
+        m._z4_set_cooldown()
+        calls = []
+        with mock.patch.object(m, "_post_embed",
+                               side_effect=lambda url, texts, timeout: (calls.append(url), [[0.0]] * len(texts))[1]):
+            m._embed_batch(["x"])
+        self.assertNotIn(m.Z4_EMBED_URL, calls)      # Z4 skipped during cooldown
+        self.assertIn(m.DARWIN_EMBED_URL, calls)
+
+    def test_z4_failure_sets_cooldown(self):
+        if m.EXPLICIT_EMBED_URL:
+            self.skipTest("MANNAMINNE_EMBED_URL set in env")
+        m._z4_clear_cooldown()
+
+        def post(url, texts, timeout):
+            if url == m.Z4_EMBED_URL:
+                raise ConnectionRefusedError("z4 down")
+            return [[0.0]] * len(texts)
+
+        with mock.patch.object(m, "_post_embed", side_effect=post):
+            m._embed_batch(["x"])                     # Z4 fails → Darwin succeeds
+        self.assertTrue(m._z4_in_cooldown())          # failure recorded a cooldown
 
 
 if __name__ == "__main__":
