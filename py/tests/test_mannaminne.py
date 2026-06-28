@@ -313,5 +313,84 @@ class EmbedEndpointCooldownTests(unittest.TestCase):
         self.assertTrue(m._z4_in_cooldown())          # failure recorded a cooldown
 
 
+class SourceFingerprintTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old = m._FINGERPRINT_FILE
+        m._FINGERPRINT_FILE = os.path.join(self._tmp, "fp.json")
+        m._PENDING_FINGERPRINTS.clear()
+
+    def tearDown(self):
+        m._FINGERPRINT_FILE = self._old
+        m._PENDING_FINGERPRINTS.clear()
+
+    def _mk(self, name, content="x"):
+        p = os.path.join(self._tmp, name)
+        with open(p, "w") as fh:
+            fh.write(content)
+        return p
+
+    def test_fingerprint_changes_on_size(self):
+        p = self._mk("a.txt", "hello")
+        fp1 = m._fingerprint_paths([p])
+        with open(p, "w") as fh:
+            fh.write("hello world much longer now")
+        self.assertNotEqual(fp1, m._fingerprint_paths([p]))
+
+    def test_skip_raises_only_after_save_when_unchanged(self):
+        p = self._mk("b.txt", "data")
+        m._skip_if_unchanged("doc", [p])                 # no stored fp → proceeds
+        self.assertIn("doc", m._PENDING_FINGERPRINTS)
+        m._save_fingerprint("doc", m._PENDING_FINGERPRINTS["doc"])
+        with self.assertRaises(m.SourceUnchanged):       # unchanged → skip
+            m._skip_if_unchanged("doc", [p])
+
+    def test_skip_proceeds_when_changed(self):
+        p = self._mk("c.txt", "v1")
+        m._skip_if_unchanged("note", [p])
+        m._save_fingerprint("note", m._PENDING_FINGERPRINTS["note"])
+        with open(p, "w") as fh:
+            fh.write("v2 different length")
+        m._skip_if_unchanged("note", [p])                # changed → must NOT raise
+
+    def test_empty_paths_never_skips(self):
+        m._save_fingerprint("email", m._fingerprint_paths([]))
+        m._skip_if_unchanged("email", [])                # empty inputs must NOT skip
+
+    def test_cmd_ingest_skips_unchanged_kind_and_excludes_from_prune(self):
+        recorded = []
+
+        class FakeCopy:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def write_row(self, _r): pass
+
+        class FakeCur:
+            rowcount = 0
+            def execute(self, sql, params=None): recorded.append((sql, params))
+            def executemany(self, sql, rows): recorded.append((sql, list(rows)))
+            def copy(self, _sql): return FakeCopy()
+
+        class FakeConn:
+            def cursor(self): return FakeCur()
+            def commit(self): pass
+            def rollback(self): pass
+
+        def unchanged():
+            raise m.SourceUnchanged("doc")
+            yield  # pragma: no cover
+
+        def normal():
+            yield ("x:1", "x", "x:1", 0, "p", "T", "body", "", "hh")
+
+        args = type("A", (), {"sources": ["doc", "x"]})()
+        with mock.patch.object(m, "load_conn", return_value=FakeConn()), \
+             mock.patch.object(m, "ALL", {"doc": unchanged, "x": normal}):
+            m.cmd_ingest(args)
+        deletes = [(s, p) for (s, p) in recorded if isinstance(s, str) and s.startswith("DELETE FROM chunks")]
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(deletes[0][1], (["x"],))        # 'doc' (unchanged) excluded from prune
+
+
 if __name__ == "__main__":
     unittest.main()

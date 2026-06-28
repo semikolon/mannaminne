@@ -176,6 +176,7 @@ def _rows(source_kind, source_id, project, title, full, created, chunker=chunk):
 
 def discover_messenger():
     base = Path(HOME) / "Projects/messenger-archive/your_activity_across_facebook/messages/inbox"
+    _skip_if_unchanged("messenger", glob.glob(str(base / "*" / "message_*.json")))
     for d in sorted(glob.glob(str(base / "*"))):
         if not os.path.isdir(d):
             continue
@@ -202,6 +203,8 @@ def discover_messenger():
 
 def discover_aichat():
     base = Path(HOME) / "Projects/ai-chat-archives"
+    _skip_if_unchanged("aichat", glob.glob(str(base / "chatgpt_*/conversations/*.json"))
+                       + glob.glob(str(base / "claude_*/conversations/*.json")))
     for f in glob.glob(str(base / "chatgpt_*/conversations/*.json")):
         try:
             j = json.load(open(f))
@@ -238,6 +241,7 @@ def discover_aichat():
 
 def discover_notes():
     d = Path(HOME) / "Documents/Simplenote Support Notes"
+    _skip_if_unchanged("note", glob.glob(str(d / "*.txt")))
     for f in glob.glob(str(d / "*.txt")):
         try:
             content = open(f, encoding="utf-8", errors="replace").read()
@@ -250,6 +254,8 @@ def discover_notes():
 
 def discover_docs():
     scans = [(Path(HOME) / "Projects", "*/docs/**/*.md"), (Path(HOME) / "dotfiles", "docs/**/*.md")]
+    _skip_if_unchanged("doc", [f for base, pat in scans
+                               for f in glob.glob(str(base / pat), recursive=True)])
     for base, pat in scans:
         for f in glob.glob(str(base / pat), recursive=True):
             if any(x in f for x in ("/archive/", "/vendor/", "/node_modules/", "/.")):
@@ -290,6 +296,64 @@ class SourceUnavailable(Exception):
     orphan-prune that would otherwise wipe its chunks from the index."""
 
 
+_FINGERPRINT_FILE = os.path.join(HOME, ".cache/mannaminne/source_fingerprints.json")
+_PENDING_FINGERPRINTS = {}
+
+
+class SourceUnchanged(Exception):
+    """Raised at the top of a discoverer when its on-disk inputs are byte-for-byte
+    unchanged since the last successful ingest (same set of path + mtime + size).
+    cmd_ingest catches it, SKIPS the source entirely (no re-read / re-chunk /
+    re-upsert) and excludes it from the orphan-prune so its chunks are kept.
+    Fingerprint errs toward re-ingesting: a superset of inputs is used, so we
+    only skip when NOTHING changed — never wrongly skip a changed source."""
+
+
+def _fingerprint_paths(paths):
+    entries = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        entries.append((str(p), st.st_mtime_ns, st.st_size))
+    entries.sort()
+    return h(repr(entries))
+
+
+def _load_fingerprints():
+    try:
+        with open(_FINGERPRINT_FILE) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_fingerprint(kind, fp):
+    try:
+        os.makedirs(os.path.dirname(_FINGERPRINT_FILE), exist_ok=True)
+        store = _load_fingerprints()
+        store[kind] = fp
+        tmp = f"{_FINGERPRINT_FILE}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(store, fh)
+        os.replace(tmp, _FINGERPRINT_FILE)
+    except Exception:
+        pass
+
+
+def _skip_if_unchanged(kind, paths):
+    """Top-of-discoverer guard: raise SourceUnchanged if the source's input files
+    are unchanged since the last successful ingest. Otherwise stash the new
+    fingerprint as PENDING — cmd_ingest persists it only AFTER the kind ingests
+    to completion (so a mid-run failure re-ingests next time, never falsely skips)."""
+    paths = list(paths)
+    fp = _fingerprint_paths(paths)
+    if paths and _load_fingerprints().get(kind) == fp:
+        raise SourceUnchanged(kind)
+    _PENDING_FINGERPRINTS[kind] = fp
+
+
 def _volume_available(path: str) -> bool:
     """For /Volumes/<vol>/... paths the volume must be mounted; all other paths
     are always 'available'."""
@@ -324,6 +388,8 @@ def discover_sessions():
     for base in paths:
         if not _volume_available(base):
             raise SourceUnavailable(f"session source volume unmounted: {base}")
+    _skip_if_unchanged("session", [f for base in paths
+                                   for f in glob.glob(os.path.join(base, "*/*.jsonl"))])
     seen_sids = set()
     for base in paths:
         for f in sorted(glob.glob(os.path.join(base, "*/*.jsonl"))):
@@ -436,6 +502,7 @@ def _email_body(msg) -> str:
     return "\n".join(out)
 
 def discover_email():
+    _skip_if_unchanged("email", [path for _label, path in MBOX_SOURCES])
     seen = set()
     for label, path in MBOX_SOURCES:
         if not os.path.exists(path):
@@ -488,6 +555,7 @@ def discover_things3():
     if not dbs:
         print("  (things3: no DB found)", flush=True)
         return
+    _skip_if_unchanged("things3", dbs)
     db = dbs[-1]
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
@@ -687,7 +755,12 @@ def cmd_ingest(args):
             conn.rollback()
             print(f"  {kind}: SKIPPED — {e} (existing chunks preserved, NOT pruned)", flush=True)
             continue
+        except SourceUnchanged:
+            print(f"  {kind}: unchanged on disk — skipped (no re-ingest)", flush=True)
+            continue
         completed_kinds.append(kind)
+        if kind in _PENDING_FINGERPRINTS:          # persist only after full success
+            _save_fingerprint(kind, _PENDING_FINGERPRINTS[kind])
         total += n
         print(f"  {kind}: {n} chunks upserted", flush=True)
     # orphan cleanup: drop chunks of the COMPLETED kinds NOT produced this run
