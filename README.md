@@ -80,6 +80,16 @@ high-value operating context outside the usual docs roots.
 batch does not poison the whole pending set. Use `embed --limit N` for bounded
 smoke tests or staged backfills.
 
+**Scheduled (Mac Mini):** two launchd jobs run nightly — a **02:00 embed-only
+backlog drainer** (`mannaminne-scheduled-embed`, ~3h budget, quiet-hour so it
+never contends with daytime embedder use) and the **05:00 full ingest+embed**
+(`mannaminne-ingest-runner` → `mannaminne-scheduled-ingest`, ~1h embed budget,
+runs after the 04:00 nightly-sweep that archives CC sessions >90d to FERMI). Both
+are budget-capped and resume from committed progress. Deployment detail (the
+nit-tracked plists, the FDA-granted responsible-process runner that reads
+~/Documents + FERMI with no TCC dialog, the FERMI-mount guard) lives in global
+`~/.claude/CLAUDE.md` § mannaminne.
+
 ## Search Ranking
 
 Search is hybrid:
