@@ -130,6 +130,69 @@ class EmbeddingTests(unittest.TestCase):
 
         self.assertEqual(out, [("a", [5]), ("b", [6])])
 
+    def test_post_embed_parses_context_exceeded_400(self):
+        # llama.cpp returns HTTP 400 when a single input exceeds the server's
+        # token context (Darwin embedder ctx=512). _post_embed must surface a
+        # typed EmbedContextExceeded carrying the parsed budget, not a generic
+        # error, so the caller can truncate-and-retry.
+        import urllib.error
+        body = (b'{"error":{"code":400,"message":"request (548 tokens) exceeds '
+                b'the available context size (512 tokens), try increasing it"}}')
+
+        def fake_urlopen(req, timeout):
+            raise urllib.error.HTTPError(
+                req.full_url, 400, "Bad Request", {}, io.BytesIO(body))
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(m.EmbedContextExceeded) as ctx:
+                m._post_embed("http://darwin.local/v1/embeddings", ["x" * 750], 12.0)
+        self.assertEqual(ctx.exception.budget_tokens, 512)
+        self.assertEqual(ctx.exception.request_tokens, 548)
+
+    def test_embed_batch_propagates_context_exceeded_over_generic(self):
+        # z4 down (network) + darwin ctx-exceeded => the batch must raise the
+        # typed EmbedContextExceeded (so _embed_pairs can truncate), NOT the
+        # generic "all endpoints failed" RuntimeError.
+        def fake_post(url, texts, timeout):
+            if url == m.Z4_EMBED_URL:
+                raise TimeoutError("z4 down")
+            raise m.EmbedContextExceeded(budget_tokens=512, request_tokens=548)
+
+        with mock.patch.object(m, "_post_embed", fake_post):
+            with self.assertRaises(m.EmbedContextExceeded):
+                m._embed_batch(["x" * 750])
+
+    def test_embed_pairs_truncates_over_context_single_chunk(self):
+        # A single over-context chunk must be shrunk to fit and embedded (head
+        # semantic vector) rather than dropped to NULL forever. Simulate a
+        # 512-ctx endpoint that rejects inputs longer than 500 chars.
+        long = "x" * 750
+
+        def fake_embed(texts):
+            if len(texts[0]) > 500:
+                raise m.EmbedContextExceeded(budget_tokens=512, request_tokens=550)
+            return [[1, 2, 3]]
+
+        with mock.patch.object(m, "_embed_batch", fake_embed):
+            out = m._embed_pairs([("cid", long)])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0], "cid")
+        self.assertEqual(out[0][1], [1, 2, 3])
+
+    def test_embed_pairs_records_drop_reason_not_misleading_default(self):
+        # A persistent non-ctx failure must surface its real reason via
+        # _LAST_DROP_REASON so cmd_embed stops mislabeling it "endpoint down".
+        m._LAST_DROP_REASON = None
+
+        def fake_embed(texts):
+            raise RuntimeError("all embedding endpoints failed: boom")
+
+        with mock.patch.object(m, "_embed_batch", fake_embed):
+            out = m._embed_pairs([("cid", "hello")])
+        self.assertEqual(out, [])
+        self.assertIsNotNone(m._LAST_DROP_REASON)
+        self.assertIn("boom", m._LAST_DROP_REASON)
+
 
 class RankingAndEvalTests(unittest.TestCase):
     def row(self, title):

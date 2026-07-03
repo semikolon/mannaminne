@@ -19,7 +19,7 @@ Aliases (argv0): `ccsearch` scopes to CC sources (session+doc); `minne` /
 Design: ~/dotfiles/docs/personal_archives_semantic_search_2026_06_10.md § v2.
 """
 from __future__ import annotations
-import os, sys, json, glob, hashlib, argparse, concurrent.futures, time, urllib.request
+import os, sys, json, glob, hashlib, argparse, concurrent.futures, time, urllib.request, urllib.error
 import re, email, html as _htmllib
 from email import policy as _emailpolicy
 import email.utils as _emailutils
@@ -804,12 +804,61 @@ def _embed_urls():
             urls.append(u)
     return urls
 
+_CTX_EXCEEDED_RE = re.compile(
+    r"request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)")
+
+# Diagnostics: why the most recently-dropped chunk failed permanently, so the
+# cmd_embed "no progress" message stops blind-guessing "endpoint down/ceded".
+_LAST_DROP_REASON = None
+
+
+class EmbedContextExceeded(Exception):
+    """A single input is denser than the ACTIVE endpoint's token context (e.g.
+    750 chars of OCR/code text = >512 tokens on the Darwin ctx-512 server, while
+    Z4 at ctx-8192 takes it whole). Carries the parsed budget so the caller can
+    truncate-and-retry instead of dropping the chunk to NULL forever."""
+    def __init__(self, budget_tokens, request_tokens=0, detail=""):
+        self.budget_tokens = int(budget_tokens)
+        self.request_tokens = int(request_tokens)
+        self.detail = detail
+        super().__init__(f"input {self.request_tokens} tokens exceeds endpoint "
+                         f"context {self.budget_tokens}")
+
+
+def _record_drop(cid, exc):
+    global _LAST_DROP_REASON
+    _LAST_DROP_REASON = f"{type(exc).__name__}: {str(exc)[:140]}"
+
+
+def _ctx_exceeded_from(http_error):
+    """Return an EmbedContextExceeded if this HTTPError is llama.cpp's
+    'request (N tokens) exceeds the available context size (M tokens)' 400,
+    else None (so the caller re-raises the original error unchanged)."""
+    if getattr(http_error, "code", None) != 400:
+        return None
+    try:
+        body = http_error.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    mm = _CTX_EXCEEDED_RE.search(body)
+    if not mm:
+        return None
+    return EmbedContextExceeded(budget_tokens=mm.group(2),
+                               request_tokens=mm.group(1), detail=body[:200])
+
+
 def _post_embed(url, texts, timeout):
     body = json.dumps({"input": texts, "model": EMBED_MODEL}).encode()
     req = urllib.request.Request(url, data=body,
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        ctx = _ctx_exceeded_from(e)
+        if ctx is not None:
+            raise ctx from e
+        raise
     return [d["embedding"][:EMBED_DIM] for d in data["data"]]
 
 def _z4_in_cooldown():
@@ -837,6 +886,7 @@ def _z4_clear_cooldown():
 def _embed_batch(texts):
     global _EMBED_URL_CACHE
     errors = []
+    ctx_exc = None
     if EXPLICIT_EMBED_URL:
         candidates = [EXPLICIT_EMBED_URL]
     else:
@@ -858,6 +908,17 @@ def _embed_batch(texts):
             if url == Z4_EMBED_URL:
                 _z4_clear_cooldown()
             return out
+        except EmbedContextExceeded as e:
+            # The endpoint is HEALTHY; the input is too big for its context. Do
+            # NOT cooldown Z4 for this. Remember it so the caller can truncate +
+            # retry, and try any remaining (possibly larger-ctx) endpoint.
+            ctx_exc = e
+            errors.append(f"{url}: context-exceeded "
+                          f"({e.request_tokens}>{e.budget_tokens} tok)")
+            if EXPLICIT_EMBED_URL:
+                break
+            if url == _EMBED_URL_CACHE:
+                _EMBED_URL_CACHE = None
         except Exception as e:
             errors.append(f"{url}: {type(e).__name__}: {e}")
             if url == Z4_EMBED_URL:
@@ -866,6 +927,8 @@ def _embed_batch(texts):
                 break
             if url == _EMBED_URL_CACHE:
                 _EMBED_URL_CACHE = None
+    if ctx_exc is not None:
+        raise ctx_exc
     raise RuntimeError("all embedding endpoints failed: " + " | ".join(errors))
 
 def _embed_query_text(q: str) -> str:
@@ -882,11 +945,49 @@ def _embed_pairs(pair):
     try:
         embs = _embed_batch([_embed_index_text(t) for _, t in pair])
         return [(pair[i][0], embs[i]) for i in range(len(pair))]
-    except Exception:
+    except EmbedContextExceeded as e:
+        # One item in the batch is over the endpoint's token context. Bisect to
+        # isolate it, then truncate-and-retry that single chunk.
         if len(pair) == 1:
+            return _embed_one_truncated(pair[0], e)
+        mid = max(1, len(pair) // 2)
+        return _embed_pairs(pair[:mid]) + _embed_pairs(pair[mid:])
+    except Exception as e:
+        if len(pair) == 1:
+            _record_drop(pair[0][0], e)
             return []
         mid = max(1, len(pair) // 2)
         return _embed_pairs(pair[:mid]) + _embed_pairs(pair[mid:])
+
+
+def _embed_one_truncated(item, exc):
+    """Shrink a single over-context chunk to fit the endpoint's parsed token
+    budget and retry, so it gets a (head) semantic vector instead of staying
+    NULL (FTS-only) forever. Endpoint-aware by construction: we only arrive here
+    because an endpoint actually rejected the full text — Z4 (ctx-8192) takes
+    these whole, so truncation is inherently the Darwin-only (ctx-512) path.
+    A later Z4-fidelity re-embed pass could recompute these at full length."""
+    cid, text = item
+    cur = _embed_index_text(text)
+    budget = exc.budget_tokens or 512
+    req = exc.request_tokens or (len(cur) // 2) or 1
+    for _ in range(6):
+        target = max(1, int(len(cur) * (budget * 0.88) / max(req, 1)))
+        if target >= len(cur):
+            target = max(1, int(len(cur) * 0.85))   # guarantee forward progress
+        cur = cur[:target]
+        try:
+            embs = _embed_batch([cur])
+            return [(cid, embs[0])]
+        except EmbedContextExceeded as e2:
+            budget = e2.budget_tokens or budget
+            req = e2.request_tokens or req
+        except Exception as e:
+            _record_drop(cid, e)
+            return []
+    _record_drop(cid, RuntimeError(
+        f"still over-context after truncation (budget {budget} tok)"))
+    return []
 
 def _vec(v):
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
@@ -939,8 +1040,11 @@ def cmd_embed(args):
                   f"(committed progress persists; next run resumes)", flush=True)
             break
         if wrote == 0:
-            # server ceded/down (idle-window guard not yet serving, or mid-cede) — wait politely
-            print("  no progress (endpoint down/ceded?) — backing off 30s", flush=True)
+            # Surface the ACTUAL reason (over-context after truncation, a parse
+            # error, etc.) instead of blind-guessing "endpoint down" — the last
+            # drop reason is set whenever a chunk is permanently dropped.
+            reason = _LAST_DROP_REASON or "endpoint unreachable/ceded"
+            print(f"  no progress ({reason}) — backing off 30s", flush=True)
             time.sleep(30)
     # build HNSW once vectors exist (idempotent)
     cur.execute("SELECT count(*) FROM chunks WHERE embedding IS NOT NULL")
