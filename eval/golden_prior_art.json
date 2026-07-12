@@ -1,0 +1,67 @@
+[
+  {
+    "query": "is the dominant brf-auto gap reading or routing",
+    "scope": "doc",
+    "must_match": ["COMPLETE_TRIED_LEDGER_docs", "reading_vs_routing_MEASURED"]
+  },
+  {
+    "query": "is the brf-auto netto 1x 2x 3x variance random reading or deterministic",
+    "scope": "doc",
+    "must_match": ["COMPLETE_TRIED_LEDGER_docs", "netto", "variance_triple"]
+  },
+  {
+    "query": "will more runs multi-run help brf-auto extraction accuracy",
+    "scope": "doc",
+    "must_match": ["COMPLETE_TRIED_LEDGER_docs", "attention_dilution", "multi_run"]
+  },
+  {
+    "query": "note arithmetic sum of items equals summa localizer new lever or already built",
+    "scope": "doc",
+    "must_match": ["holepoke_arithmetic_localizer", "COMPLETE_TRIED_LEDGER_docs"]
+  },
+  {
+    "query": "does itemizing the catch-all note-detail recovery close the brf-auto gap",
+    "scope": "doc",
+    "must_match": ["note_item_loss", "catchall_decomposition", "COMPLETE_TRIED_LEDGER_docs"]
+  },
+  {
+    "query": "is the netto 2x double-count a new live bug in brf-auto",
+    "scope": "doc",
+    "must_match": ["COMPLETE_TRIED_LEDGER_docs", "balance_sheet_double_count"]
+  },
+  {
+    "query": "is Sinan a reliable oracle or does he over-dump to catch-alls",
+    "scope": "doc",
+    "must_match": ["sinan_correction_patterns", "COMPLETE_TRIED_LEDGER_docs"]
+  },
+  {
+    "query": "does Pattern 3 underhall routing need per-line judgment or one rule",
+    "scope": "doc",
+    "must_match": ["pattern_3_stage_c", "COMPLETE_TRIED_LEDGER_docs"]
+  },
+  {
+    "query": "is the routing whac-a-mole growing justifying the LLM flip",
+    "scope": "doc",
+    "must_match": ["routing_flip_necessity_audit", "COMPLETE_TRIED_LEDGER_docs"]
+  },
+  {
+    "query": "is the brf-auto LLM routing flip eval scoring fair",
+    "scope": "doc",
+    "must_match": ["flip_eval", "COMPLETE_TRIED_LEDGER_docs"]
+  },
+  {
+    "query": "is OCR attachment refuted for brf-auto scanned PDFs",
+    "scope": "doc",
+    "must_match": ["tesseract_ocr_integration_plan", "COMPLETE_TRIED_LEDGER_docs"]
+  },
+  {
+    "query": "how many files have the vector-path note-title drop",
+    "scope": "doc",
+    "must_match": ["COMPLETE_TRIED_LEDGER_docs", "note_title", "vector"]
+  },
+  {
+    "query": "should brf-auto extraction temperature be 1.0 or lower",
+    "scope": "doc",
+    "must_match": ["catchall_root_cause_reframe", "COMPLETE_TRIED_LEDGER_docs", "temperature"]
+  }
+]

@@ -19,7 +19,7 @@ Aliases (argv0): `ccsearch` scopes to CC sources (session+doc); `minne` /
 Design: ~/dotfiles/docs/personal_archives_semantic_search_2026_06_10.md § v2.
 """
 from __future__ import annotations
-import os, sys, json, glob, hashlib, argparse, concurrent.futures, time, urllib.request, urllib.error
+import os, sys, json, glob, hashlib, argparse, concurrent.futures, time, urllib.request, urllib.error, subprocess
 import re, email, html as _htmllib
 from email import policy as _emailpolicy
 import email.utils as _emailutils
@@ -71,6 +71,17 @@ SEARCH_SOFT_TERM_LIMIT = _env_int("MANNAMINNE_SEARCH_SOFT_TERM_LIMIT", 12)
 SEARCH_SOFT_PER_TERM_LIMIT = _env_int("MANNAMINNE_SEARCH_SOFT_PER_TERM_LIMIT", 12)
 HNSW_EF_SEARCH = _env_int("MANNAMINNE_HNSW_EF_SEARCH", 100)
 RRF_K = _env_int("MANNAMINNE_RRF_K", 60)
+# Recency signal: on the PROJECT RECORD (docs/sessions/commits/code) a newer hit
+# on the same topic usually SUPERSEDES an older one (the brf-auto flip-flop trap:
+# a June "reading is the gap" doc sitting two lines from the July "routing
+# dominates" refutation). A small additive recency term edges newer above older
+# when relevance is near-tied, WITHOUT overriding a strong relevance gap. Applied
+# ONLY to the project-record kinds — the life-corpus (2014 emails, old notes)
+# must stay findable, so recency is deliberately NOT applied there. Layer-3
+# tunable per *Architecture vs parameters* (observe misses, tune without code).
+RECENCY_WEIGHT = _env_float("MANNAMINNE_RECENCY_WEIGHT", 0.05, min_value=0.0)
+RECENCY_WINDOW_DAYS = _env_float("MANNAMINNE_RECENCY_WINDOW_DAYS", 730.0, min_value=1.0)
+_PROJECT_RECORD_KINDS = {"doc", "session", "git_commit", "code"}
 QUERY_INSTRUCTION = os.environ.get(
     "MANNAMINNE_QUERY_INSTRUCTION",
     "Given a personal archive search query, retrieve relevant passages, notes, docs, sessions, tasks, or messages that answer it.",
@@ -116,6 +127,16 @@ def chunk(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP,
         yield idx, text[i:i + size]
         i += step
         idx += 1
+
+def _single_chunk(text: str):
+    """Chunker that yields the whole text as ONE chunk (idx 0). Used for git
+    commit messages — per code-retrieval research a commit message is a single
+    semantic unit and must NOT be split into char windows. FTS stores the full
+    text; the embed step head-truncates the vector (EMBED_MAX_CHARS), which is
+    fine because the subject + head of the body carries the signal."""
+    text = text.strip()
+    if text:
+        yield 0, text
 
 _MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
@@ -730,10 +751,152 @@ def discover_screenshots():
     _flush()
     print(f"  screenshots/photos: {n} images processed (OCR cached at {_OCR_CACHE})", flush=True)
 
+# --- git commit history (the 2,924-commit-per-repo record — read-only) --------
+# The "was this tried / decided / refuted before?" prior-art layer. Commit
+# subject+body holds change-rationale that docs often miss; it's the append-only
+# NL-over-prose corpus where semantic search unambiguously beats agentic grep
+# (2026 field research). One chunk per commit (never split — research §1). LOCAL
+# repos only (skip symlinks + /Volumes) so an unmounted FERMI archive can never
+# trigger the orphan-prune of previously-indexed commits.
+
+_GIT_COMMIT_MAX_CHARS = _env_int("MANNAMINNE_GIT_COMMIT_MAX_CHARS", 4000)
+
+def _git_repos():
+    # Allowlist override: MANNAMINNE_GIT_REPOS=brf-auto,dotfiles restricts to
+    # those repo names (comma/os.pathsep separated). Unset → all local repos.
+    # Curation: vendored/forked third-party clones carry upstream commit history
+    # that is noise, not Fredrik's decision record — the allowlist is how a
+    # future run scopes to his OWN repos once the set is chosen.
+    allow = os.environ.get("MANNAMINNE_GIT_REPOS", "").replace(os.pathsep, ",")
+    allow_set = {n.strip() for n in allow.split(",") if n.strip()} or None
+    if allow_set is None:
+        # Persistent curated allowlist (used by the nightly refresh + default
+        # manual runs). Env override above wins for one-off scoped runs.
+        try:
+            cfg = (Path(HOME) / ".config/mannaminne/code_repos.txt").read_text()
+            names = {ln.strip() for ln in cfg.splitlines()
+                     if ln.strip() and not ln.startswith("#")}
+            allow_set = names or None
+        except Exception:
+            allow_set = None
+    roots = []
+    for d in sorted(glob.glob(str(Path(HOME) / "Projects/*"))):
+        p = Path(d)
+        try:
+            # Symlinks are FOLLOWED, not skipped — a project archived to a FERMI
+            # symlink (project-archival cold-pass) stays indexed while the volume
+            # is mounted ((p/'.git').is_dir() resolves through the symlink). A
+            # broken symlink (volume unmounted) fails is_dir() → skipped, and the
+            # project-scoped prune in cmd_ingest PRESERVES its chunks. Together
+            # these make the index survive archive→restore cycles.
+            if not (p / ".git").is_dir():
+                continue
+        except OSError:
+            continue
+        if allow_set is None or p.name in allow_set:
+            roots.append(p)
+    dotfiles = Path(HOME) / "dotfiles"
+    if (dotfiles / ".git").is_dir() and (allow_set is None or "dotfiles" in allow_set):
+        roots.append(dotfiles)
+    return roots
+
+def discover_git_commits():
+    repos = _git_repos()
+    # .git/logs/HEAD grows by one line per ref update, so its (mtime,size)
+    # fingerprint changes exactly when new commits land → clean incremental skip.
+    _skip_if_unchanged("git_commit", [str(r / ".git/logs/HEAD") for r in repos])
+    n = 0
+    for repo in repos:
+        name = repo.name
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(repo), "log", "--no-merges", "-z",
+                 "--format=%H%x1f%an%x1f%aI%x1f%s%x1f%b"],
+                capture_output=True, text=True, timeout=180,
+                encoding="utf-8", errors="replace").stdout
+        except Exception as e:
+            print(f"  (git_commit/{name}: git log failed: {type(e).__name__})", flush=True)
+            continue
+        for rec in out.split("\x00"):
+            if not rec.strip():
+                continue
+            parts = rec.split("\x1f")
+            if len(parts) < 5:
+                continue
+            sha, author, date, subject, body = (parts + [""] * 5)[:5]
+            sha = sha.strip()
+            if not sha:
+                continue
+            created = (date or "")[:10]
+            header = f"commit {sha[:8]} · {name} · {created} · {author}".strip()
+            full = f"{header}\n{subject}\n\n{body}".strip()[:_GIT_COMMIT_MAX_CHARS]
+            yield from _rows("git_commit", f"gitcommit:{name}:{sha}", name,
+                             (subject or sha[:8])[:80], full, created,
+                             chunker=_single_chunk)
+            n += 1
+    print(f"  git_commit: {n} commits from {len(repos)} repos", flush=True)
+
+# --- code (cAST tree-sitter symbol chunks — the missing "where is X / what does
+# X do" layer) ---------------------------------------------------------------
+# Reuses discover plumbing but chunks via code_chunker (cAST split-then-merge +
+# metadata header). v1 lands as a `code` source_kind in the existing `chunks`
+# table (not a dedicated code_chunks table) — fastest path, all plumbing reused,
+# and the project + source_kind filters cleanly separate code from life-corpus
+# at query time. Dedicated symbol/line columns are the documented later refinement.
+# Budget defaults to ~700 nw-chars to FIT the Darwin ctx-512 embedder (the
+# standing path while the Z4 ctx-8192 accelerator is VPN-pending).
+
+_CODE_MAX_FILE_BYTES = _env_int("MANNAMINNE_CODE_MAX_FILE_BYTES", 200_000)
+_CODE_SKIP_SUBSTR = ("/vendor/", "/node_modules/", "/.git/", "/dist/", "/build/",
+                     "/tmp/", "/coverage/", "/.venv/", "/target/", ".min.js", ".min.css")
+
+def discover_code():
+    import code_chunker
+    max_chars = _env_int("MANNAMINNE_CODE_MAX_CHARS", 700)
+    repos = _git_repos()
+    files = []
+    for repo in repos:
+        try:
+            tracked = subprocess.run(["git", "-C", str(repo), "ls-files"],
+                                     capture_output=True, text=True, timeout=60,
+                                     encoding="utf-8", errors="replace").stdout.splitlines()
+        except Exception:
+            continue
+        for rel in tracked:
+            if code_chunker.guess_language(rel) is None:
+                continue
+            if any(s in "/" + rel for s in _CODE_SKIP_SUBSTR):
+                continue
+            files.append((repo, rel))
+    _skip_if_unchanged("code", [str(repo / rel) for repo, rel in files])
+    n = 0
+    for repo, rel in files:
+        fp = repo / rel
+        try:
+            if fp.stat().st_size > _CODE_MAX_FILE_BYTES:
+                continue
+            src = fp.read_bytes()
+            created = time.strftime("%Y-%m-%d", time.gmtime(fp.stat().st_mtime))
+        except Exception:
+            continue
+        name = repo.name
+        try:
+            chunks = code_chunker.chunk_code(src, rel, max_chars=max_chars)
+        except Exception:
+            continue
+        sid = f"code:{name}:{rel}"
+        for ci, ch in enumerate(chunks):
+            text = ch.text.replace("\x00", "")
+            title = (f"{rel} › {ch.symbol}" if ch.symbol else rel)[:120].replace("\x00", "")
+            yield (f"{sid}#{ci}", "code", sid, ci, name, title, text, created, h(text))
+            n += 1
+    print(f"  code: {n} chunks from {len(repos)} repos", flush=True)
+
 ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "note": discover_notes, "doc": discover_docs, "session": discover_sessions,
        "email": discover_email, "things3": discover_things3, "fyr": discover_fyr,
-       "screenshot": discover_screenshots}
+       "screenshot": discover_screenshots, "git_commit": discover_git_commits,
+       "code": discover_code}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -773,9 +936,33 @@ def cmd_ingest(args):
             for x in seen:
                 cp.write_row((x,))
         cur.execute("CREATE INDEX ON _seen (id)")
-        cur.execute("DELETE FROM chunks WHERE source_kind = ANY(%s) "
-                    "AND NOT EXISTS (SELECT 1 FROM _seen s WHERE s.id = chunks.id)", (completed_kinds,))
-        pruned = cur.rowcount
+        pruned = 0
+        # Non-code kinds: kind-scoped prune (each has its own SourceUnavailable/
+        # SourceUnchanged guard; a skipped kind never reaches completed_kinds).
+        other = [k for k in completed_kinds if k not in ("code", "git_commit")]
+        if other:
+            cur.execute("DELETE FROM chunks WHERE source_kind = ANY(%s) "
+                        "AND NOT EXISTS (SELECT 1 FROM _seen s WHERE s.id = chunks.id)", (other,))
+            pruned += cur.rowcount
+        # code/git_commit: PROJECT-scoped prune — only within repos actually
+        # processed THIS run. A repo absent this run (archived to a FERMI symlink
+        # whose volume is unmounted, temporarily removed, or deleted) is NOT in
+        # processed_projects, so its chunks are PRESERVED — the index survives
+        # archive→restore cycles. Within a processed repo a deleted file still
+        # prunes (project matches, id unseen). Subsumes the old env-allowlist
+        # skip: an env-scoped subset run only sees its own projects, so it can
+        # only prune its own repos.
+        code_kinds = [k for k in completed_kinds if k in ("code", "git_commit")]
+        processed_projects = sorted({
+            x.split(":", 2)[1] for x in seen
+            if (x.startswith("code:") or x.startswith("gitcommit:")) and x.count(":") >= 2
+        })
+        if code_kinds and processed_projects:
+            cur.execute("DELETE FROM chunks WHERE source_kind = ANY(%s) "
+                        "AND project = ANY(%s) "
+                        "AND NOT EXISTS (SELECT 1 FROM _seen s WHERE s.id = chunks.id)",
+                        (code_kinds, processed_projects))
+            pruned += cur.rowcount
         cur.execute("DROP TABLE _seen"); conn.commit()
         print(f"  pruned {pruned} orphaned chunks", flush=True)
     print(f"ingest done: {total} chunks. (full-text search is live now.)", flush=True)
@@ -1092,6 +1279,15 @@ def _should_exact_phrase(q: str) -> bool:
 def _rrf(rank: int, k: int = RRF_K) -> float:
     return 1.0 / (k + rank)
 
+def _recency01(datestr: str) -> float:
+    """Newer→1.0, older→0.0, linear over RECENCY_WINDOW_DAYS. 0.0 if unparseable."""
+    try:
+        t = time.mktime(time.strptime((datestr or "")[:10], "%Y-%m-%d"))
+    except Exception:
+        return 0.0
+    days_ago = max(0.0, (time.time() - t) / 86400.0)
+    return max(0.0, 1.0 - days_ago / RECENCY_WINDOW_DAYS)
+
 def _fuse_ranked(results, limit: int):
     for x in results.values():
         score = x.get("kw_rrf", 0.0)
@@ -1101,6 +1297,9 @@ def _fuse_ranked(results, limit: int):
             score += 1.0 * _rrf(x["sem_rank"])
         if x.get("exact"):
             score += 0.02
+        # recency edge on the project record only (supersession signal)
+        if x["r"][1] in _PROJECT_RECORD_KINDS and x["r"][5]:
+            score += RECENCY_WEIGHT * _recency01(x["r"][5])
         x["score"] = score
     ranked = sorted(results.values(),
                     key=lambda x: (x.get("score", 0.0), x.get("sem", 0.0)),
@@ -1165,15 +1364,23 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
             _add_keyword_result(results, r, rank, weight=0.35)
     return results
 
-def search_results(q: str, scope=None, keyword=False, limit=12, conn=None):
+def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, conn=None):
     owned = conn is None
     conn = conn or load_conn()
     cur = conn.cursor()
-    where_scope = ""
-    params_scope = []
+    # Two independent hard filters, both threaded through the existing
+    # where_scope/params_scope seam (kept in placeholder order): source_kind
+    # (which corpus) AND project (which repo/project). project scoping is what
+    # makes the cross-project index usable — restrict "was this tried in THIS
+    # repo?" to the repo, instead of leaking cross-project noise.
+    where_parts, params_scope = [], []
     if scope:
-        where_scope = " AND source_kind = ANY(%s)"
-        params_scope = [scope]
+        where_parts.append(" AND source_kind = ANY(%s)")
+        params_scope.append(scope)
+    if projects:
+        where_parts.append(" AND project = ANY(%s)")
+        params_scope.append(projects)
+    where_scope = "".join(where_parts)
     # 1) keyword layer, no GPU. Exact phrase is intentionally limited to short
     #    queries; long natural-language queries are better served by FTS layers.
     results = _keyword_results(cur, q, where_scope, params_scope)
@@ -1209,18 +1416,24 @@ def search_results(q: str, scope=None, keyword=False, limit=12, conn=None):
 def cmd_search(args):
     q = " ".join(args.query)
     scope = _scope(args)
-    ranked = search_results(q, scope=scope, keyword=args.keyword, limit=args.limit)
+    projects = _project_scope(args)
+    ranked = search_results(q, scope=scope, projects=projects,
+                            keyword=args.keyword, limit=args.limit)
     if not ranked:
         print("No results."); return
     tag = {"session": "\033[36m[session]", "doc": "\033[33m[doc]", "messenger": "\033[35m[msgr]",
            "aichat": "\033[34m[aichat]", "note": "\033[32m[note]", "email": "\033[90m[email]",
            "things3": "\033[93m[things3]", "fyr": "\033[91m[fyr]",
-           "screenshot": "\033[96m[shot]"}
+           "screenshot": "\033[96m[shot]", "git_commit": "\033[92m[commit]",
+           "code": "\033[94m[code]"}
     for i, x in enumerate(ranked, 1):
         r = x["r"]
         kw = " \033[32m[kw]\033[0m" if x["kw"] else ""
-        print(f"{i}. {tag.get(r[1],'[?]')}\033[0m \033[1m{r[3]}\033[0m  "
-              f"\033[2m({r[2]}, sem={x['sem']:.2f}{', '+r[5] if r[5] else ''})\033[0m{kw}")
+        # Date is a BRIGHT visual anchor (not buried in dim parens): on a
+        # flip-flopped topic the reader must instantly see which hit is current.
+        date = f" \033[1;33m{r[5]}\033[0m" if r[5] else ""
+        print(f"{i}. {tag.get(r[1],'[?]')}\033[0m \033[1m{r[3]}\033[0m{date}  "
+              f"\033[2m({r[2]}, sem={x['sem']:.2f})\033[0m{kw}")
         print(f"   \033[2m{(r[4] or '').replace(chr(10),' ')[:180]}\033[0m")
 
 def _result_blob(result) -> str:
@@ -1232,6 +1445,14 @@ def _case_scope(case):
         return [scope]
     if isinstance(scope, list):
         return scope
+    return None
+
+def _case_projects(case):
+    proj = case.get("project") or case.get("repo")
+    if isinstance(proj, str):
+        return [proj]
+    if isinstance(proj, list):
+        return proj
     return None
 
 def _case_expectations(case):
@@ -1280,8 +1501,8 @@ def cmd_eval(args):
         q = case["query"]
         expectations = _case_expectations(case)
         t0 = time.perf_counter()
-        ranked = search_results(q, scope=_case_scope(case), keyword=args.keyword,
-                                limit=args.k, conn=conn)
+        ranked = search_results(q, scope=_case_scope(case), projects=_case_projects(case),
+                                keyword=args.keyword, limit=args.k, conn=conn)
         latency_ms = (time.perf_counter() - t0) * 1000
         latencies.append(latency_ms)
         rank = _hit_rank(ranked, expectations)
@@ -1324,15 +1545,22 @@ def cmd_stats(args):
 
 def _scope(args):
     flags = []
-    for k in ("session", "doc", "messenger", "aichat", "note", "email", "things3", "fyr", "screenshot"):
+    for k in ("session", "doc", "messenger", "aichat", "note", "email",
+              "things3", "fyr", "screenshot", "git_commit", "code"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
         return flags
     invoked = os.environ.get("MANNAMINNE_INVOKED_AS") or os.path.basename(sys.argv[0])
     if invoked == "ccsearch":
-        return ["session", "doc"]   # legacy ccsearch alias → CC sources only
+        return ["session", "doc", "git_commit", "code"]   # ccsearch alias → code-project sources
     return None                     # mannaminne / minne → all sources
+
+def _project_scope(args):
+    """Hard project/repo filter (WHERE project = ANY). `--project brf-auto` or
+    `--project a b c`. Empty → no project filter (all projects)."""
+    proj = getattr(args, "project", None)
+    return [p for p in proj if p] if proj else None
 
 def _add_search_args(sp):
     sp.add_argument("query", nargs="*")
@@ -1347,6 +1575,10 @@ def _add_search_args(sp):
     sp.add_argument("-t", "--things3", action="store_true")
     sp.add_argument("-f", "--fyr", action="store_true")
     sp.add_argument("-p", "--photos", dest="screenshot", action="store_true")
+    sp.add_argument("-g", "--git", dest="git_commit", action="store_true")
+    sp.add_argument("-c", "--code", action="store_true")
+    sp.add_argument("-P", "--project", "--repo", nargs="*",
+                    help="restrict to project/repo(s), e.g. --project brf-auto")
 
 def main():
     argv = sys.argv[1:]

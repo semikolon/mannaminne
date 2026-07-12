@@ -17,9 +17,9 @@ ENVF="$CONF/db.env"
 PGPORT=5440
 PGHOST_BIND=192.168.4.1   # Darwin LAN
 
-echo "[mannaminne setup] venv + psycopg"
+echo "[mannaminne setup] venv + psycopg + tree-sitter (code chunker)"
 python3 -m venv "$PYDIR/.venv" 2>/dev/null || true
-"$PYDIR/.venv/bin/pip" -q install 'psycopg[binary]'
+"$PYDIR/.venv/bin/pip" -q install 'psycopg[binary]' tree-sitter tree-sitter-language-pack
 
 echo "[mannaminne setup] wrappers → $BIN"
 mkdir -p "$BIN"
