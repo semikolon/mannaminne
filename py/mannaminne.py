@@ -47,6 +47,9 @@ EMBED_MODEL = os.environ.get("MANNAMINNE_EMBED_MODEL", "qwen3-embedding-4b")
 EMBED_DIM = _env_int("MANNAMINNE_EMBED_DIM", 1024)  # 8B native=4096; MRL-truncatable to 1024
 EMBED_TIMEOUT = _env_float("MANNAMINNE_EMBED_TIMEOUT", 45.0)
 EMBED_PROBE_TIMEOUT = _env_float("MANNAMINNE_EMBED_PROBE_TIMEOUT", 5.0)
+# Interactive QUERY embed fast-fails the usually-dead Z4 accelerator: "it works
+# within ~1s or it won't." (Batch embed keeps the longer 5s probe for throughput.)
+QUERY_PROBE_TIMEOUT = _env_float("MANNAMINNE_QUERY_PROBE_TIMEOUT", 1.0)
 EMBED_BATCH_SIZE = _env_int("MANNAMINNE_EMBED_BATCH_SIZE", 4)
 EMBED_WORKERS = _env_int("MANNAMINNE_EMBED_WORKERS", 2)
 EMBED_SELECT_LIMIT = _env_int("MANNAMINNE_EMBED_SELECT_LIMIT", 500)
@@ -1070,15 +1073,22 @@ def _z4_clear_cooldown():
     except Exception:
         pass
 
-def _embed_batch(texts):
+def _embed_batch(texts, for_query=False):
     global _EMBED_URL_CACHE
     errors = []
     ctx_exc = None
     if EXPLICIT_EMBED_URL:
         candidates = [EXPLICIT_EMBED_URL]
+    elif for_query:
+        # Interactive QUERY embed: Darwin is the always-on standing endpoint
+        # (~80ms idle); Z4 is a batch accelerator that is USUALLY DOWN. A search
+        # must never pay Z4's probe timeout, so go Darwin-FIRST and give the Z4
+        # fallback a ≤1s fast-fail. If Darwin is also unreachable the caller's
+        # try/except degrades to keyword-only — never a multi-second hang.
+        candidates = [u for u in (DARWIN_EMBED_URL, Z4_EMBED_URL) if u]
     else:
-        # Prefer the Z4 tunnel whenever available (much faster). After a Z4
-        # failure a file-based cooldown skips re-probing it for Z4_COOLDOWN_SECS,
+        # BATCH embed: prefer the Z4 tunnel when available (much faster). After a
+        # Z4 failure a file-based cooldown skips re-probing it for Z4_COOLDOWN_SECS,
         # so a long Darwin run does not pay the probe timeout on every batch; the
         # cooldown auto-expires so the run migrates back to Z4 once it returns.
         candidates = _embed_urls()
@@ -1086,7 +1096,9 @@ def _embed_batch(texts):
             candidates = [u for u in candidates if u != Z4_EMBED_URL] or candidates
     for url in candidates:
         try:
-            if EXPLICIT_EMBED_URL or url == _EMBED_URL_CACHE or url == DARWIN_EMBED_URL:
+            if for_query and url == Z4_EMBED_URL:
+                timeout = QUERY_PROBE_TIMEOUT       # fast-fail the usually-dead Z4
+            elif EXPLICIT_EMBED_URL or url == _EMBED_URL_CACHE or url == DARWIN_EMBED_URL:
                 timeout = EMBED_TIMEOUT
             else:
                 timeout = EMBED_PROBE_TIMEOUT
@@ -1387,7 +1399,7 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
     # 2) semantic layer (if embeddings exist + embedder reachable)
     if not keyword:
         try:
-            qe = _vec(_embed_batch([_embed_query_text(q)])[0])
+            qe = _vec(_embed_batch([_embed_query_text(q)], for_query=True)[0])
             try:
                 cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
             except Exception:
