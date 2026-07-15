@@ -1434,6 +1434,25 @@ def cmd_search(args):
     projects = _project_scope(args)
     ranked = search_results(q, scope=scope, projects=projects,
                             keyword=args.keyword, limit=args.limit)
+    if not getattr(args, "pretty", False):
+        # DEFAULT: JSONL — one JSON object per hit. date / source / score are
+        # FIELDS, not a droppable prose header line, so a consuming agent that
+        # filters the results cannot accidentally strip recency/source/relevance
+        # (the 2026-07 miss that motivated making JSON the default). No results
+        # → zero lines (exit 0). --pretty restores the coloured human prose.
+        for i, x in enumerate(ranked, 1):
+            r = x["r"]
+            print(json.dumps({
+                "rank": i,
+                "source": r[1],
+                "date": r[5] or None,
+                "project": r[2],
+                "title": r[3],
+                "sem": round(x["sem"], 3),
+                "kw": bool(x["kw"]),
+                "snippet": (r[4] or "").replace("\n", " ")[:500],
+            }, ensure_ascii=False))
+        return
     if not ranked:
         print("No results."); return
     tag = {"session": "\033[36m[session]", "doc": "\033[33m[doc]", "messenger": "\033[35m[msgr]",
@@ -1594,6 +1613,11 @@ def _add_search_args(sp):
     sp.add_argument("-c", "--code", action="store_true")
     sp.add_argument("-P", "--project", "--repo", nargs="*",
                     help="restrict to project/repo(s), e.g. --project brf-auto")
+    sp.add_argument("--pretty", action="store_true",
+                    help="human-readable coloured prose output. DEFAULT is JSONL "
+                         "(one JSON object per hit with date/source/score/snippet "
+                         "fields) so an agent consuming results can't accidentally "
+                         "strip a load-bearing field by grepping the prose.")
 
 def main():
     argv = sys.argv[1:]
