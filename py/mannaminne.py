@@ -264,7 +264,10 @@ def discover_aichat():
         yield from _rows("aichat", f"aichat:cl:{uuid}", "claude", name or uuid[:60], full, created)
 
 def discover_notes():
-    d = Path(HOME) / "Documents/Simplenote Support Notes"
+    # Materialized, non-iCloud local copy (was ~/Documents/Simplenote Support Notes,
+    # which is iCloud Drive + goes dataless when iCloud storage is full → a scheduled
+    # ingest could read empty files and PRUNE the notes from the DB). Canonical archive.
+    d = Path(HOME) / ".claude/archives/simplenote-notes"
     _skip_if_unchanged("note", glob.glob(str(d / "*.txt")))
     for f in glob.glob(str(d / "*.txt")):
         try:
