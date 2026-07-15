@@ -680,6 +680,34 @@ def discover_fyr():
 _OCR_CACHE = Path(HOME) / ".cache/mannaminne/ocr_cache.json"
 _FERMI_SS = "/Volumes/FERMI/MacMini-archives additions/Screenshots"
 _FERMI_PHOTOLIB = "/Volumes/FERMI/Photos Library.photoslibrary"
+# iPhone screenshot originals live in iCLOUD, not on FERMI (p.path is None), so
+# OCR can't run on them from the library. osxphotos exports the full-res
+# originals to VOLTA; this map lets discover_screenshots resolve a screenshot's
+# original from that export (by uuid) and OCR it — same photo:{uuid} row, so no
+# duplication and the nightly ingest maintains it (no clobber back to labels).
+_VOLTA_SS = os.environ.get("MANNAMINNE_VOLTA_SCREENSHOTS", "/Volumes/VOLTA/screenshot-originals")
+_VOLTA_ORIG_CACHE = None
+
+def _volta_originals():
+    """{uuid: fullpath} for screenshots exported to VOLTA (read from osxphotos'
+    own export db). Cached per process; empty if the export/volume is absent."""
+    global _VOLTA_ORIG_CACHE
+    if _VOLTA_ORIG_CACHE is not None:
+        return _VOLTA_ORIG_CACHE
+    out = {}
+    dbp = os.path.join(_VOLTA_SS, ".osxphotos_export.db")
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
+        for uuid, fp in con.execute("SELECT uuid, filepath FROM export_data WHERE error IS NULL"):
+            full = os.path.join(_VOLTA_SS, fp)
+            if os.path.exists(full):
+                out[uuid] = full
+        con.close()
+    except Exception:
+        pass
+    _VOLTA_ORIG_CACHE = out
+    return out
 
 def _ocr_text(path, cache):
     if not path:
@@ -744,7 +772,8 @@ def discover_screenshots():
                     break
                 n += 1
                 labels = ", ".join((p.labels or [])[:10])
-                txt = _ocr_text(p.path, cache) if (p.path and p.screenshot) else ""
+                src = p.path or (_volta_originals().get(p.uuid) if p.screenshot else None)
+                txt = _ocr_text(src, cache) if (src and p.screenshot) else ""
                 if not txt and not labels:
                     continue
                 lbl = "iphone-screenshot" if p.screenshot else "photo"
