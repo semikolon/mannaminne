@@ -189,14 +189,31 @@ def h(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()[:16]
 
 # --- source discovery (yields chunk rows) -----------------------------------
-# Each row: (id, source_kind, source_id, chunk_idx, project, title, text, created, content_hash)
+# Each row: (id, source_kind, source_id, chunk_idx, project, title, text, created, updated, content_hash)
 
-def _rows(source_kind, source_id, project, title, full, created, chunker=chunk):
+def _rows(source_kind, source_id, project, title, full, created, chunker=chunk, updated=None):
     title = (title or "").replace("\x00", "")          # Postgres text rejects NUL (0x00)
+    upd = updated or created                            # floor: last-known-update >= created
     for idx, ch in chunker(full):
         ch = ch.replace("\x00", "")
         yield (f"{source_id}#{idx}", source_kind, source_id, idx, project,
-               title, ch, created, h(ch))
+               title, ch, created, upd, h(ch))
+
+
+_DOC_DATE_RE = re.compile(r"(20\d{2})[-_](\d{2})[-_](\d{2})")
+
+def _doc_dates(path):
+    """(created, updated) as YYYY-MM-DD strings. created = the date embedded in
+    the filename (`_2026_01_18` / `-2026-07-06`) if present, else the file mtime;
+    updated = the file mtime. So a doc first written in Jan but edited last week
+    reads created=Jan, updated=last-week — the distinction the search needs."""
+    try:
+        mtime = time.strftime("%Y-%m-%d", time.gmtime(os.path.getmtime(path)))
+    except Exception:
+        mtime = ""
+    m = _DOC_DATE_RE.search(os.path.basename(path))
+    created = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else mtime
+    return created, mtime
 
 def discover_messenger():
     base = Path(HOME) / "Projects/messenger-archive/your_activity_across_facebook/messages/inbox"
@@ -297,8 +314,9 @@ def discover_docs():
                 continue
             project = "dotfiles" if str(base).endswith("dotfiles") else Path(f).relative_to(base).parts[0]
             rel = os.path.relpath(f, base)
-            yield from _rows("doc", f"doc:{project}:{rel}", project, Path(f).stem, content, "",
-                             chunker=chunk_markdown)
+            cr, up = _doc_dates(f)
+            yield from _rows("doc", f"doc:{project}:{rel}", project, Path(f).stem, content, cr,
+                             chunker=chunk_markdown, updated=up)
 
     # Global agent instructions are high-value retrieval context but live outside
     # the normal docs roots. Index the canonical file only; ~/.codex/AGENTS.md is
@@ -310,8 +328,9 @@ def discover_docs():
         except Exception:
             content = ""
         if content.strip():
+            cr, up = _doc_dates(str(global_claude))
             yield from _rows("doc", "doc:global-claude:CLAUDE.md", "global-claude",
-                             "CLAUDE.md", content, "", chunker=chunk_markdown)
+                             "CLAUDE.md", content, cr, chunker=chunk_markdown, updated=up)
 
 _NOISE = ("<system-reminder>", "This session is being continued", "Caveat:",
           "# CLAUDE.md", "Codebase and user instructions are shown below",
@@ -923,7 +942,7 @@ def discover_code():
         for ci, ch in enumerate(chunks):
             text = ch.text.replace("\x00", "")
             title = (f"{rel} › {ch.symbol}" if ch.symbol else rel)[:120].replace("\x00", "")
-            yield (f"{sid}#{ci}", "code", sid, ci, name, title, text, created, h(text))
+            yield (f"{sid}#{ci}", "code", sid, ci, name, title, text, created, created, h(text))
             n += 1
     print(f"  code: {n} chunks from {len(repos)} repos", flush=True)
 
@@ -938,6 +957,8 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
 def cmd_ingest(args):
     conn = load_conn()
     cur = conn.cursor()
+    # Migrate pre-existing DBs to the created/updated split (idempotent).
+    cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS updated TEXT"); conn.commit()
     kinds = args.sources or list(ALL)
     seen, total, completed_kinds = [], 0, []
     for kind in kinds:
@@ -1005,11 +1026,11 @@ def cmd_ingest(args):
 def _upsert(cur, rows):
     # Upsert; if the chunk text changed (hash differs) reset its embedding so it re-embeds.
     cur.executemany(
-        """INSERT INTO chunks (id,source_kind,source_id,chunk_idx,project,title,text,created,content_hash)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """INSERT INTO chunks (id,source_kind,source_id,chunk_idx,project,title,text,created,updated,content_hash)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (id) DO UPDATE SET
              text=EXCLUDED.text, title=EXCLUDED.title, project=EXCLUDED.project,
-             created=EXCLUDED.created,
+             created=EXCLUDED.created, updated=EXCLUDED.updated,
              embedding = CASE WHEN chunks.content_hash <> EXCLUDED.content_hash
                               THEN NULL ELSE chunks.embedding END,
              content_hash=EXCLUDED.content_hash""",
@@ -1363,7 +1384,7 @@ def _fuse_ranked(results, limit: int):
 def _add_keyword_result(results, row, rank: int, weight: float, exact: bool = False):
     rid = row[0]
     if rid not in results:
-        results[rid] = {"r": row[:6], "kw": True, "sem": 0.0, "kwscore": 0.0}
+        results[rid] = {"r": row[:6] + (row[7],), "kw": True, "sem": 0.0, "kwscore": 0.0}
     x = results[rid]
     x["kw"] = True
     x["kw_rrf"] = x.get("kw_rrf", 0.0) + weight * _rrf(rank)
@@ -1375,7 +1396,7 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
     results = {}
     if _should_exact_phrase(q):
         cur.execute(
-            f"""SELECT id,source_kind,project,title,left(text,200),created,1.0 AS rank
+            f"""SELECT id,source_kind,project,title,left(text,200),created,1.0 AS rank,updated
                 FROM chunks
                 WHERE text ILIKE %s{where_scope}
                 ORDER BY length(text) ASC
@@ -1386,7 +1407,7 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
 
     cur.execute(
         f"""SELECT id,source_kind,project,title,left(text,200),created,
-                   ts_rank(tsv, plainto_tsquery('simple',%s)) AS rank
+                   ts_rank(tsv, plainto_tsquery('simple',%s)) AS rank,updated
             FROM chunks
             WHERE tsv @@ plainto_tsquery('simple',%s){where_scope}
             ORDER BY ts_rank(tsv, plainto_tsquery('simple',%s)) DESC
@@ -1398,7 +1419,7 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
     for term in _soft_terms(q):
         cur.execute(
             f"""SELECT id,source_kind,project,title,left(text,200),created,
-                       ts_rank(tsv, to_tsquery('simple',%s)) AS rank
+                       ts_rank(tsv, to_tsquery('simple',%s)) AS rank,updated
                 FROM chunks
                 WHERE tsv @@ to_tsquery('simple',%s){where_scope}
                 ORDER BY ts_rank(tsv, to_tsquery('simple',%s)) DESC
@@ -1438,7 +1459,7 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
                 pass
             cur.execute(
                 f"""SELECT id,source_kind,project,title,left(text,200),created,
-                           1-(embedding<=>%s::vector) AS sem FROM chunks
+                           1-(embedding<=>%s::vector) AS sem,updated FROM chunks
                     WHERE embedding IS NOT NULL{where_scope}
                     ORDER BY embedding<=>%s::vector LIMIT %s""",
                 [qe, *params_scope, qe, SEARCH_SEMANTIC_LIMIT])
@@ -1448,7 +1469,7 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
                     results[rid]["sem"] = float(r[6])
                     results[rid]["sem_rank"] = rank
                 else:
-                    results[rid] = {"r": r[:6], "kw": False, "sem": float(r[6]),
+                    results[rid] = {"r": r[:6] + (r[7],), "kw": False, "sem": float(r[6]),
                                     "kwscore": 0.0, "sem_rank": rank}
         except Exception as e:
             print(f"(semantic layer skipped: {e})", file=sys.stderr)
@@ -1474,7 +1495,8 @@ def cmd_search(args):
             print(json.dumps({
                 "rank": i,
                 "source": r[1],
-                "date": r[5] or None,
+                "created": r[5] or None,
+                "updated": (r[6] if len(r) > 6 else None) or None,
                 "project": r[2],
                 "title": r[3],
                 "sem": round(x["sem"], 3),

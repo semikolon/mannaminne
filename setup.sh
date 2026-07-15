@@ -55,9 +55,11 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE TABLE IF NOT EXISTS chunks (
   id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
   chunk_idx INT NOT NULL, project TEXT, title TEXT, text TEXT NOT NULL,
-  created TEXT, content_hash TEXT NOT NULL, embedding vector(1024),
+  created TEXT, updated TEXT, content_hash TEXT NOT NULL, embedding vector(1024),
   tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(title,'') || ' ' || text)) STORED
 );
+-- Migration for pre-existing DBs (created before the created/updated split):
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS updated TEXT;
 CREATE INDEX IF NOT EXISTS chunks_tsv_gin  ON chunks USING gin(tsv);
 CREATE INDEX IF NOT EXISTS chunks_trgm_gin ON chunks USING gin(text gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS chunks_kind     ON chunks(source_kind);
