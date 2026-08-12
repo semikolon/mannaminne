@@ -296,13 +296,88 @@ def discover_notes():
         name = Path(f).stem
         yield from _rows("note", f"note:{name}", "simplenote", name, content, "")
 
+#: Paths whose CONTENT is never worth indexing even though they match a doc glob:
+#: third-party READMEs, terminal history, and the abandoned iCloud copy of the
+#: Simplenote notes (those are indexed from ~/.claude/archives/simplenote-notes/
+#: by `discover_notes` — indexing both would duplicate all 523).
+_DOC_EXCLUDE = (
+    "/archive/", "/vendor/", "/node_modules/", "/.",
+    "/Simplenote Support Notes/",  # already covered by discover_notes
+    "/warp_history_export/",  # terminal history
+    "/Arduino/libraries/",  # third-party
+    "/.config/mackup/",  # iCloud: a 2014 backup of vim/Brackets plugins
+)
+
+
+def _is_dataless(path):
+    """True when the file is an iCloud placeholder: it reports a size but has no
+    blocks on disk (`st_blocks == 0`), or reports zero size for a file that is
+    supposed to have content.
+
+    Load-bearing: `~/Documents` IS iCloud Drive. With iCloud storage full those
+    files go dataless, and a SCHEDULED ingest that reads them gets empty strings —
+    which the orphan-prune then treats as "these documents are gone" and wipes
+    their chunks. That exact hazard is why the Simplenote source was moved to a
+    materialized local copy on 2026-07-15 (design doc § Notes source moved off
+    iCloud). The guard generalizes that one-off fix: a dataless file is SKIPPED,
+    never read as empty, so a full iCloud can no longer silently empty the index."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return True
+    return st.st_size > 0 and getattr(st, "st_blocks", 1) == 0
+
+
+def _walk_docs(base, suffixes):
+    """Yield files under `base` with one of `suffixes`, PRUNING excluded dirs.
+
+    Not `glob("**/*.md")`: that descends into every excluded subtree before
+    filtering, and over ~/Documents (Arduino libraries, IRC logs, Craft/Obsidian
+    trees) it did not finish in 120 s — twice per run, since the fingerprint pass
+    globs too. Pruning at the directory level keeps the scan to the parts that can
+    actually contribute."""
+    base = str(base)
+    if not os.path.isdir(base):
+        return
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs
+                   if not d.startswith(".")
+                   and f"/{d}/" not in _DOC_EXCLUDE
+                   and not any(x.strip("/") == d for x in _DOC_EXCLUDE)]
+        for fn in files:
+            if fn.endswith(suffixes):
+                full = os.path.join(root, fn)
+                if not any(x in full for x in _DOC_EXCLUDE):
+                    yield full
+
+
 def discover_docs():
-    scans = [(Path(HOME) / "Projects", "*/docs/**/*.md"), (Path(HOME) / "dotfiles", "docs/**/*.md")]
-    _skip_if_unchanged("doc", [f for base, pat in scans
-                               for f in glob.glob(str(base / pat), recursive=True)])
-    for base, pat in scans:
-        for f in glob.glob(str(base / pat), recursive=True):
-            if any(x in f for x in ("/archive/", "/vendor/", "/node_modules/", "/.")):
+    # (root, suffixes, project-label-mode)
+    walks = [
+        (Path(HOME) / "dotfiles", (".md",), "dotfiles"),
+        # Personal writing outside any repo: kollektiv-applications, the Obsidian
+        # vault, the Craft journal, KK-Utflytt, creative-projects, IRC logs.
+        (Path(HOME) / "Documents", (".md", ".txt"), "documents"),
+        # iCloud Drive proper (the 2014 mackup backup under it is excluded).
+        (Path(HOME) / "Library/Mobile Documents/com~apple~CloudDocs", (".md",), "icloud"),
+    ]
+    files = [(base, mode, f) for base, sfx, mode in walks for f in _walk_docs(base, sfx)]
+    # ~/Projects stays GLOB-scoped, not walked: a full walk would pull in every
+    # vendored README from every clone. Two patterns only — each repo's docs/ dir
+    # (as before) plus its ROOT-level .md, the class that left fyr's
+    # high-level-graph-view.md and voice_architecture_session.md unfindable.
+    projects = Path(HOME) / "Projects"
+    for pat in ("*/docs/**/*.md", "*/*.md"):
+        for f in glob.glob(str(projects / pat), recursive=True):
+            if not any(x in f for x in _DOC_EXCLUDE):
+                files.append((projects, "repo", f))
+    _skip_if_unchanged("doc", [f for _, _, f in files])
+    for base, mode, f in files:
+        if True:
+            if any(x in f for x in _DOC_EXCLUDE):
+                continue
+            if _is_dataless(f):
+                print(f"doc: skipping dataless iCloud placeholder {f}", file=sys.stderr)
                 continue
             try:
                 if os.path.getsize(f) > 600_000:
@@ -312,7 +387,18 @@ def discover_docs():
                 continue
             if not content.strip():
                 continue
-            project = "dotfiles" if str(base).endswith("dotfiles") else Path(f).relative_to(base).parts[0]
+            if mode == "dotfiles":
+                project = "dotfiles"
+            elif mode == "icloud":
+                project = "icloud"
+            elif mode == "documents":
+                # First path segment is the folder (kollektiv-applications,
+                # KK-Utflytt, Obsidian Vault); a loose file at the root gets a
+                # stable label rather than its own filename as a "project".
+                parts = Path(f).relative_to(base).parts
+                project = parts[0] if len(parts) > 1 else "documents"
+            else:
+                project = Path(f).relative_to(base).parts[0]
             rel = os.path.relpath(f, base)
             cr, up = _doc_dates(f)
             yield from _rows("doc", f"doc:{project}:{rel}", project, Path(f).stem, content, cr,
