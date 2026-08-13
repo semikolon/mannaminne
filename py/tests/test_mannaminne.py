@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -43,7 +44,12 @@ class ChunkingTests(unittest.TestCase):
                             chunker=lambda _full: [(0, "a\x00b")]))
         self.assertEqual(rows[0][5], "Title")
         self.assertEqual(rows[0][6], "ab")
-        self.assertEqual(rows[0][8], m.h("ab"))
+        # Index 8 is `updated`, 9 is the content hash. The assertion below read
+        # index 8 as the hash and had been failing since the created/updated split
+        # added a column ahead of it (commit 2bf1bf3) — column drift, not a bug in
+        # _rows. `updated` floors to `created` when not given, which is "" here.
+        self.assertEqual(rows[0][8], "")
+        self.assertEqual(rows[0][9], m.h("ab"))
 
 
 class EmbeddingTests(unittest.TestCase):
@@ -457,3 +463,222 @@ class SourceFingerprintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SimplenoteDateTests(unittest.TestCase):
+    """The .txt export is dateless; the JSON sidecar carries creationDate +
+    lastModified. These pin the join between them.
+
+    The fixture's SHAPE is copied from the real export — CRLF line endings inside
+    the JSON `content` field, and the `Tags:` footer that the .txt writer appends
+    and the JSON does not carry. Those two details are the entire reason a naive
+    equality join fails, so an invented fixture would have passed while matching
+    nothing (see global CLAUDE.md, *a fixture is copied from reality*). The prose
+    is substituted; the format is not.
+    """
+
+    def _export(self, tmp):
+        d = Path(tmp)
+        (d / "source").mkdir(parents=True)
+        (d / "source" / "notes.json").write_text(json.dumps({
+            "activeNotes": [
+                {"id": "a1", "content": "Kort anteckning\r\n\r\nEn rad text.",
+                 "creationDate": "2012-02-29T01:25:45.000Z",
+                 "lastModified": "2019-04-18T09:00:00.000Z"},
+                {"id": "b2", "content": "Utan tagg\r\n\r\nAnnan text.",
+                 "creationDate": "2020-07-17T08:11:23.340Z",
+                 "lastModified": "2020-07-17T08:11:23.340Z"},
+            ],
+            "trashedNotes": [
+                {"id": "t3", "content": "Slängd\r\n\r\nSka inte synas.",
+                 "creationDate": "2011-01-01T00:00:00.000Z",
+                 "lastModified": "2011-01-01T00:00:00.000Z"},
+            ],
+        }), encoding="utf-8")
+        # The .txt writer uses LF and appends the tag footer.
+        (d / "Kort anteckning.txt").write_text(
+            "Kort anteckning\n\nEn rad text.\n\nTags: cv\n", encoding="utf-8")
+        (d / "Utan tagg.txt").write_text(
+            "Utan tagg\n\nAnnan text.\n", encoding="utf-8")
+        return d
+
+    def test_dates_join_across_the_tags_footer_and_crlf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._export(tmp)
+            dates = m._simplenote_dates(d)
+            tagged = m._note_norm(m._NOTE_TAGS_FOOTER.sub(
+                "", (d / "Kort anteckning.txt").read_text(encoding="utf-8")))
+            self.assertEqual(dates[tagged], ("2012-02-29", "2019-04-18"))
+            plain = m._note_norm((d / "Utan tagg.txt").read_text(encoding="utf-8"))
+            self.assertEqual(dates[plain], ("2020-07-17", "2020-07-17"))
+
+    def test_trashed_notes_are_not_indexed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dates = m._simplenote_dates(self._export(tmp))
+            self.assertNotIn(m._note_norm("Slängd\n\nSka inte synas."), dates)
+
+    def test_duplicate_content_resolves_to_the_oldest_deterministically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "source").mkdir(parents=True)
+            (d / "source" / "notes.json").write_text(json.dumps({"activeNotes": [
+                {"id": "y", "content": "Samma", "creationDate": "2021-05-05T00:00:00.000Z",
+                 "lastModified": "2021-05-05T00:00:00.000Z"},
+                {"id": "x", "content": "Samma", "creationDate": "2014-01-02T00:00:00.000Z",
+                 "lastModified": "2014-01-02T00:00:00.000Z"},
+            ]}), encoding="utf-8")
+            self.assertEqual(m._simplenote_dates(d)[m._note_norm("Samma")][0], "2014-01-02")
+
+    def test_missing_json_costs_the_dates_not_the_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(m._simplenote_dates(Path(tmp)), {})
+
+    def test_real_export_joins_for_essentially_every_note(self):
+        """The corpus assertion. A fixture pins the shape; only the real export
+        pins reality — this is the check that would have caught a pattern that
+        matched the fixture and nothing else."""
+        d = Path(m.HOME) / ".claude/archives/simplenote-notes"
+        files = sorted(d.glob("*.txt"))
+        if not files or not (d / "source" / "notes.json").exists():
+            self.skipTest("simplenote export not present on this machine")
+        dates = m._simplenote_dates(d)
+        dated = sum(
+            1 for f in files
+            if dates.get(m._note_norm(m._NOTE_TAGS_FOOTER.sub(
+                "", f.read_text(encoding="utf-8", errors="replace"))))
+        )
+        self.assertGreaterEqual(dated / len(files), 0.99, f"only {dated}/{len(files)} joined")
+
+
+class PartialKindPruneSafetyTests(unittest.TestCase):
+    """The live-Gmail half made `email` a kind that can legitimately re-emit only
+    PART of itself in a run: the 4.7 GB archives are skipped when unchanged, while
+    the live half still runs. Without an exclusion the orphan-prune would read the
+    un-emitted archive chunks as deleted and drop 658k of them."""
+
+    def _run_ingest_recording_deletes(self, discoverers, kinds):
+        recorded = []
+
+        class FakeCopy:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def write_row(self, _r): pass
+
+        class FakeCur:
+            rowcount = 0
+            def execute(self, sql, params=None): recorded.append((sql, params))
+            def executemany(self, sql, rows): recorded.append((sql, list(rows)))
+            def copy(self, _sql): return FakeCopy()
+
+        class FakeConn:
+            def cursor(self): return FakeCur()
+            def commit(self): pass
+            def rollback(self): pass
+
+        args = type("A", (), {"sources": kinds})()
+        with mock.patch.object(m, "load_conn", return_value=FakeConn()), \
+             mock.patch.object(m, "ALL", discoverers):
+            m.cmd_ingest(args)
+        return [(s, p) for (s, p) in recorded
+                if isinstance(s, str) and s.startswith("DELETE FROM chunks")]
+
+    def setUp(self):
+        self._saved = set(m._PARTIAL_KINDS)
+        m._PARTIAL_KINDS.clear()
+
+    def tearDown(self):
+        m._PARTIAL_KINDS.clear()
+        m._PARTIAL_KINDS.update(self._saved)
+
+    def test_partial_kind_is_excluded_from_the_prune(self):
+        def partial_email():
+            m._PARTIAL_KINDS.add("email")
+            yield ("email:new#0", "email", "email:new", 0, "gmail", "S", "b", "2026-08-13", "2026-08-13", "hh")
+
+        def whole_doc():
+            yield ("doc:one#0", "doc", "doc:one", 0, "proj", "T", "body", "", "", "hash")
+
+        deletes = self._run_ingest_recording_deletes(
+            {"email": partial_email, "doc": whole_doc}, ["email", "doc"])
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(deletes[0][1], (["doc"],), "email ran partially and must not be pruned")
+
+    def test_a_whole_kind_is_still_pruned(self):
+        def whole_email():
+            yield ("email:new#0", "email", "email:new", 0, "gmail", "S", "b", "2026-08-13", "2026-08-13", "hh")
+
+        deletes = self._run_ingest_recording_deletes({"email": whole_email}, ["email"])
+        self.assertEqual(deletes[0][1], (["email"],))
+
+
+class GmailLiveTests(unittest.TestCase):
+    def test_watermark_advances_only_over_messages_that_came_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = os.path.join(tmp, "gmail_state.json")
+            fetched = {"a": (b"From: x\r\nSubject: A\r\n\r\nbody", 1_700_000_000_000),
+                       "b": None}  # b fails to read
+            with mock.patch.object(m, "_GMAIL_STATE", state), \
+                 mock.patch.object(m, "_gmail_list_ids", return_value=["a", "b"]), \
+                 mock.patch.object(m, "_gmail_fetch_raw", side_effect=lambda i: fetched[i]):
+                list(m._gmail_live_messages())
+            saved = json.load(open(state))
+            self.assertEqual(saved["watermark_ms"], 1_700_000_000_000)
+            self.assertEqual(saved["retry_ids"], ["b"], "a failed id must be retried, not silently dropped")
+
+    def test_mbox_and_live_share_one_id_so_a_duplicate_upserts_onto_itself(self):
+        raw = (b"Message-ID: <abc@example.com>\r\nSubject: Hej\r\n"
+               b"From: a@b.se\r\nDate: Tue, 12 Aug 2026 10:00:00 +0200\r\n\r\nkropp")
+        from_mbox = list(m._email_rows(b"From x\n" + raw, set()))
+        from_live = list(m._email_rows(raw, set(), fallback_epoch_ms=1_760_000_000_000))
+        self.assertTrue(from_mbox and from_live)
+        self.assertEqual(from_mbox[0][0], from_live[0][0])
+        self.assertEqual(from_mbox[0][7], "2026-08-12")
+
+    def test_internaldate_fills_in_for_a_malformed_date_header(self):
+        raw = b"Message-ID: <z@x>\r\nSubject: Trasig\r\nDate: not-a-date\r\n\r\nkropp"
+        ms = 1_723_500_000_000
+        rows = list(m._email_rows(raw, set(), fallback_epoch_ms=ms))
+        # Expected value COMPUTED from the input, not typed from memory: my first
+        # pass asserted 2024-08-13 by eyeballing the epoch and was off by a day.
+        self.assertEqual(rows[0][7], time.strftime("%Y-%m-%d", time.gmtime(ms / 1000)))
+        self.assertEqual(rows[0][7], "2024-08-12")
+
+
+class MalformedHeaderTests(unittest.TestCase):
+    """A single malformed header aborted the 2026-08-13 Gmail backfill at 21%
+    (26 000 of 123 338) with "address parts cannot contain CR or LF". The
+    generator died and every remaining message went unfetched.
+
+    The fixture below carries the REAL failure shape — a raw CR/LF folded into an
+    address header, which `policy=default` only rejects when the header is
+    stringified, not when the message is parsed. An invented "weird header" would
+    not reproduce it, because the exception comes from address parsing
+    specifically."""
+
+    RAW = (b"Message-ID: <ok@example.com>\r\n"
+           b"Subject: Fungerar\r\n"
+           b"From: \"Broken\r\n Name\" <a@b.se>, <c@\r\nd.se>\r\n"
+           b"To: x@y.se\r\n"
+           b"Date: Tue, 12 Aug 2026 10:00:00 +0200\r\n\r\nkropp")
+
+    def test_a_malformed_address_header_does_not_kill_the_message(self):
+        rows = list(m._email_rows(self.RAW, set()))
+        self.assertTrue(rows, "the message must still be indexed")
+        self.assertEqual(rows[0][5], "Fungerar", "the good headers still land")
+
+    def test_internaldate_still_dates_it_when_the_headers_are_mangled(self):
+        # A raw CR/LF can break the header BOUNDARIES, so Date: may be
+        # unrecoverable no matter how defensively it is read. That is exactly why
+        # the live path passes Gmail's own internalDate as a fallback — assert the
+        # guarantee the fix actually makes, not a date this hand-built fixture
+        # happens to preserve.
+        ms = 1_723_500_000_000
+        rows = list(m._email_rows(self.RAW, set(), fallback_epoch_ms=ms))
+        self.assertEqual(rows[0][7], time.strftime("%Y-%m-%d", time.gmtime(ms / 1000)))
+
+    def test_the_message_is_keyed_and_deduped_normally(self):
+        seen = set()
+        first = list(m._email_rows(self.RAW, seen))
+        second = list(m._email_rows(self.RAW, seen))
+        self.assertTrue(first)
+        self.assertEqual(second, [], "same Message-ID must dedup on the second pass")

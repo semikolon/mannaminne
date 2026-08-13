@@ -280,13 +280,61 @@ def discover_aichat():
         uuid = j.get("uuid") or Path(f).stem
         yield from _rows("aichat", f"aichat:cl:{uuid}", "claude", name or uuid[:60], full, created)
 
+#: The `.txt` files in the Simplenote support export carry no timestamps at all,
+#: so every note chunk ingested before 2026-08-13 had an EMPTY date — invisible to
+#: date filters and unrankable by recency, across a decade of Fredrik's own
+#: thinking. The dates DO exist, in the JSON the export ships alongside the text
+#: (`source/notes.json`: `creationDate` + `lastModified` per note). This maps one
+#: to the other.
+#:
+#: Matching is by CONTENT, not by filename: the export's filename convention is
+#: the note's first line, which collides and mangles (91 of 524 do not round-trip),
+#: while content is exact. The one systematic difference is that the `.txt` writer
+#: appends a `Tags: …` footer the JSON `content` field does not carry — strip it
+#: and 519 of 521 files match exactly, the other 2 being genuine duplicate-content
+#: notes (resolved to the oldest, so the choice is stable across runs).
+_NOTE_TAGS_FOOTER = re.compile(r"\s*Tags:\s*[^\n]*\s*$")
+
+
+def _note_norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").replace("\r\n", "\n")).strip()
+
+
+def _simplenote_dates(export_dir):
+    """{normalized-content: (created, updated)} as YYYY-MM-DD, from the JSON export.
+
+    Returns {} when the JSON is missing or unreadable, which degrades to the old
+    dateless behaviour rather than skipping the source — a missing sidecar should
+    cost the dates, never the notes."""
+    js = Path(export_dir) / "source" / "notes.json"
+    try:
+        data = json.loads(js.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    out = {}
+    for n in data.get("activeNotes") or []:          # trashedNotes stay out, deliberately
+        key = _note_norm(n.get("content"))
+        if not key:
+            continue
+        created = (n.get("creationDate") or "")[:10]
+        updated = (n.get("lastModified") or "")[:10] or created
+        prev = out.get(key)
+        # Duplicate content → keep the OLDEST creation, so the pick is deterministic.
+        if prev is None or (created and created < prev[0]):
+            out[key] = (created, updated)
+    return out
+
+
 def discover_notes():
     # Materialized, non-iCloud local copy (was ~/Documents/Simplenote Support Notes,
     # which is iCloud Drive + goes dataless when iCloud storage is full → a scheduled
     # ingest could read empty files and PRUNE the notes from the DB). Canonical archive.
     d = Path(HOME) / ".claude/archives/simplenote-notes"
-    _skip_if_unchanged("note", glob.glob(str(d / "*.txt")))
-    for f in glob.glob(str(d / "*.txt")):
+    files = glob.glob(str(d / "*.txt"))
+    # notes.json joins the fingerprint: a re-export that only changes dates still re-ingests.
+    _skip_if_unchanged("note", files + [str(d / "source" / "notes.json")])
+    dates = _simplenote_dates(d)
+    for f in files:
         try:
             content = open(f, encoding="utf-8", errors="replace").read()
         except Exception:
@@ -294,7 +342,12 @@ def discover_notes():
         if not content.strip():
             continue
         name = Path(f).stem
-        yield from _rows("note", f"note:{name}", "simplenote", name, content, "")
+        created, updated = dates.get(_note_norm(_NOTE_TAGS_FOOTER.sub("", content)), ("", ""))
+        # source_id stays `note:<stem>`: the chunk ids are unchanged, so filling in
+        # the dates costs no re-embedding (_upsert only clears the vector when the
+        # TEXT hash changes).
+        yield from _rows("note", f"note:{name}", "simplenote", name, content,
+                         created, updated=updated or created)
 
 #: Paths whose CONTENT is never worth indexing even though they match a doc glob:
 #: third-party READMEs, terminal history, and the abandoned iCloud copy of the
@@ -430,6 +483,15 @@ class SourceUnavailable(Exception):
 
 _FINGERPRINT_FILE = os.path.join(HOME, ".cache/mannaminne/source_fingerprints.json")
 _PENDING_FINGERPRINTS = {}
+
+
+#: Kinds that ran only PARTIALLY this pass — some of their chunks were deliberately
+#: not re-emitted (an unchanged 4.7 GB archive skipped in favour of its live half),
+#: or a half of the source failed. The orphan-prune deletes chunks of a completed
+#: kind that this run did not produce, so a partial kind MUST be excluded from it:
+#: otherwise "I did not re-read the archive" reads as "the archive is gone" and
+#: 658k chunks are deleted. Same hazard class as the iCloud dataless guard.
+_PARTIAL_KINDS = set()
 
 
 class SourceUnchanged(Exception):
@@ -633,46 +695,249 @@ def _email_body(msg) -> str:
         pass
     return "\n".join(out)
 
-def discover_email():
-    _skip_if_unchanged("email", [path for _label, path in MBOX_SOURCES])
-    seen = set()
-    for label, path in MBOX_SOURCES:
-        if not os.path.exists(path):
-            print(f"  (email/{label}: missing at {path})", flush=True)
-            continue
-        nmsg = nuniq = nskip = 0
-        for raw in _iter_mbox(path):
-            nmsg += 1
-            if raw.startswith(b"From "):           # strip mbox envelope separator
-                nl = raw.find(b"\n")
-                raw = raw[nl + 1:] if nl != -1 else raw
+#: Live Gmail, the other half of the email source.
+#:
+#: The mbox archives stop at **Sept 2014** (a Takeout taken then), so everything
+#: since was unsearchable — a twelve-year hole in the middle of the corpus, and
+#: the single largest gap in it. The design doc named the two ways to close it
+#: (a fresh Takeout, or the live API) and neither was built.
+#:
+#: This uses the live API through `gws`, which already holds Fredrik's OAuth in
+#: the macOS keyring, so no credential is extracted, copied or handled here — the
+#: token never enters this process. The cost is one subprocess per message, which
+#: is why the fetch is pooled; it is still bounded by the network, not the CPU.
+#:
+#: Dedup is free: a message is keyed by `email:{h(Message-ID)}`, the SAME id the
+#: mbox path emits, so a message present in both archives and Gmail simply upserts
+#: onto itself rather than appearing twice.
+GMAIL_LIVE = os.environ.get("MANNAMINNE_GMAIL_LIVE", "1") != "0"
+#: Spam is noise; trash is not (Fredrik on the IRC logs: all older history is
+#: valuable, and a deleted mail was still something that happened).
+GMAIL_QUERY = os.environ.get("MANNAMINNE_GMAIL_QUERY", "-in:spam")
+#: The mbox coverage ends 2014-09-05; start one day earlier so the boundary day
+#: is fetched from both and deduped rather than falling between them.
+GMAIL_SINCE_FLOOR = "2014/09/04"
+GMAIL_WORKERS = int(os.environ.get("MANNAMINNE_GMAIL_WORKERS", "16"))
+_GMAIL_STATE = os.path.join(HOME, ".cache/mannaminne/gmail_state.json")
+
+
+def _gmail_state():
+    try:
+        with open(_GMAIL_STATE) as fh:
+            return json.load(fh)
+    except Exception:
+        return {"watermark_ms": 0, "retry_ids": []}
+
+
+def _save_gmail_state(state):
+    os.makedirs(os.path.dirname(_GMAIL_STATE), exist_ok=True)
+    tmp = _GMAIL_STATE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, _GMAIL_STATE)
+
+
+def _gws_json(args, timeout=60):
+    """Run a `gws` command and parse its JSON. gws prints a keyring banner before
+    the payload on some paths, so parse from the first brace rather than the first
+    byte."""
+    out = subprocess.run(["gws", *args], capture_output=True, text=True, timeout=timeout)
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout or "gws failed").strip()[:200])
+    s = out.stdout
+    i = s.find("{")
+    if i < 0:
+        raise RuntimeError("gws returned no JSON")
+    return json.loads(s[i:])
+
+
+def _gmail_list_ids(query):
+    """All message ids matching `query`, oldest-first is not guaranteed by the API
+    so the caller must not rely on order."""
+    ids, token = [], None
+    while True:
+        params = {"userId": "me", "q": query, "maxResults": 500}
+        if token:
+            params["pageToken"] = token
+        page = _gws_json(["gmail", "users", "messages", "list", "--params", json.dumps(params)])
+        ids.extend(m["id"] for m in page.get("messages") or [])
+        token = page.get("nextPageToken")
+        if not token:
+            return ids
+
+
+def _gmail_fetch_raw(mid):
+    """(rfc822-bytes, internalDate-ms) for one message, or None when it cannot be
+    read. `format=raw` hands back the original message, so the SAME parser the
+    mbox path uses applies unchanged."""
+    d = _gws_json(["gmail", "users", "messages", "get", "--params",
+                   json.dumps({"userId": "me", "id": mid, "format": "raw"})])
+    raw = d.get("raw")
+    if not raw:
+        return None
+    import base64
+    return base64.urlsafe_b64decode(raw.encode()), int(d.get("internalDate") or 0)
+
+
+def _gmail_live_messages():
+    """Yield (rfc822-bytes, internalDate-ms), newest work first is irrelevant —
+    what matters is that the watermark only advances past messages that actually
+    parsed, so an interrupted run resumes instead of skipping a hole."""
+    state = _gmail_state()
+    since_ms = int(state.get("watermark_ms") or 0)
+    if since_ms:
+        # Two days of overlap absorbs clock skew and same-second boundaries; the
+        # duplicates cost nothing because the Message-ID id upserts onto itself.
+        day = time.strftime("%Y/%m/%d", time.gmtime(since_ms / 1000 - 2 * 86400))
+    else:
+        day = GMAIL_SINCE_FLOOR
+    query = f"after:{day} {GMAIL_QUERY}".strip()
+    listed = _gmail_list_ids(query)
+    # OLDEST-first. The API returns newest-first, but the watermark is a high-water
+    # mark: walking oldest-first makes the completed set a contiguous prefix, so a
+    # run killed at hour three resumes where it stopped instead of re-fetching
+    # everything or, worse, skipping the middle. Out-of-order completion inside the
+    # pool can overshoot by at most `workers` messages, which the two-day query
+    # overlap absorbs.
+    ids = list(dict.fromkeys(list(state.get("retry_ids") or []) + listed[::-1]))
+    if not ids:
+        print("  email/gmail-live: nothing new", flush=True)
+        return
+    print(f"  email/gmail-live: {len(ids)} message(s) to fetch (query: {query})", flush=True)
+    failed, highest, done = [], since_ms, 0
+
+    def _checkpoint():
+        _save_gmail_state({"watermark_ms": highest, "retry_ids": failed[:5000]})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=GMAIL_WORKERS) as pool:
+        futures = {pool.submit(_gmail_fetch_raw, i): i for i in ids}
+        for fut in concurrent.futures.as_completed(futures):
+            mid = futures[fut]
             try:
-                msg = email.message_from_bytes(raw, policy=_emailpolicy.default)
-            except Exception:
-                nskip += 1; continue
-            mid = (str(msg.get("Message-ID") or msg.get("Message-Id") or "")).strip().strip("<>")
-            subj = str(msg.get("Subject") or "").strip()
-            frm = str(msg.get("From") or "").strip()
-            to = str(msg.get("To") or "").strip()
-            datehdr = str(msg.get("Date") or "").strip()
-            body = _email_body(msg) or ""
-            if not subj and not body:
-                nskip += 1; continue
-            key = mid or h(f"{datehdr}|{frm}|{subj}|{len(body)}")
-            if key in seen:
+                got = fut.result()
+            except KeyboardInterrupt:
+                raise
+            except BaseException:               # one bad message never ends the run
+                failed.append(mid)
                 continue
-            seen.add(key); nuniq += 1
-            created = ""
+            if not got:
+                failed.append(mid)
+                continue
+            raw, internal = got
+            done += 1
+            if internal > highest:
+                highest = internal
+            if done % 1000 == 0:                   # survive a kill mid-backfill
+                _checkpoint()
+                print(f"  email/gmail-live: {done}/{len(ids)} fetched", flush=True)
+            yield raw, internal
+    # Only advance past what actually came back, and carry the failures forward so
+    # the next run retries them by id rather than leaving a silent hole.
+    _checkpoint()
+    print(f"  email/gmail-live: {done} fetched, {len(failed)} failed (retried next run)", flush=True)
+
+
+def _email_rows(raw, seen, fallback_epoch_ms=0):
+    """Parse one RFC822 message and yield its chunk rows. Shared by the mbox and
+    live-Gmail paths so the two can never drift apart in how a message is keyed,
+    titled or chunked."""
+    if raw.startswith(b"From "):                   # strip mbox envelope separator
+        nl = raw.find(b"\n")
+        raw = raw[nl + 1:] if nl != -1 else raw
+    try:
+        msg = email.message_from_bytes(raw, policy=_emailpolicy.default)
+    except Exception:
+        return
+    def hdr(*names):
+        """One header as text, never raising.
+
+        `policy=default` parses structured headers lazily, so `str()` on an
+        address header is where a MALFORMED one finally blows up — e.g. a raw
+        CR/LF inside a From:/To: value raises "address parts cannot contain CR or
+        LF". A single such message out of 123 338 aborted the whole 2026-08-13
+        Gmail backfill at 21%: the generator died, and every remaining message
+        went unfetched. One unparseable header must cost that ONE header, never
+        the run. Falls back to the raw undecoded value, then to empty."""
+        for n in names:
             try:
-                dt = _emailutils.parsedate_to_datetime(datehdr)
-                if dt:
-                    created = dt.strftime("%Y-%m-%d")
+                v = msg.get(n)
             except Exception:
-                pass
-            title = subj or (frm[:60] if frm else "(no subject)")
-            full = f"{subj}\nFrom: {frm}\nTo: {to}\nDate: {datehdr}\n\n{body}"
-            yield from _rows("email", f"email:{h(key)}", "gmail", title, full, created)
-        print(f"  email/{label}: {nmsg} msgs → {nuniq} unique-new, {nskip} skipped", flush=True)
+                continue
+            if v is None:
+                continue
+            try:
+                return str(v).strip()
+            except Exception:
+                try:                            # raw source, bypassing the parser
+                    return str(msg.get_raw(n) if hasattr(msg, "get_raw") else v.encode()).strip()
+                except Exception:
+                    continue
+        return ""
+
+    mid = hdr("Message-ID", "Message-Id").strip("<>")
+    subj = hdr("Subject")
+    frm = hdr("From")
+    to = hdr("To")
+    datehdr = hdr("Date")
+    body = _email_body(msg) or ""
+    if not subj and not body:
+        return
+    key = mid or h(f"{datehdr}|{frm}|{subj}|{len(body)}")
+    if key in seen:
+        return
+    seen.add(key)
+    created = ""
+    try:
+        dt = _emailutils.parsedate_to_datetime(datehdr)
+        if dt:
+            created = dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    if not created and fallback_epoch_ms:          # a malformed Date: header
+        created = time.strftime("%Y-%m-%d", time.gmtime(fallback_epoch_ms / 1000))
+    title = subj or (frm[:60] if frm else "(no subject)")
+    full = f"{subj}\nFrom: {frm}\nTo: {to}\nDate: {datehdr}\n\n{body}"
+    yield from _rows("email", f"email:{h(key)}", "gmail", title, full, created)
+
+
+def discover_email():
+    mbox_paths = [path for _label, path in MBOX_SOURCES]
+    mbox_stale = True
+    if GMAIL_LIVE:
+        # The archives never change, so their fingerprint would skip the WHOLE
+        # source and the live half with it. Skip only the 4.7 GB re-parse, and
+        # mark the kind PARTIAL so the orphan-prune cannot mistake the un-emitted
+        # archive chunks for deleted ones.
+        try:
+            _skip_if_unchanged("email", mbox_paths)
+        except SourceUnchanged:
+            mbox_stale = False
+            _PARTIAL_KINDS.add("email")
+    else:
+        _skip_if_unchanged("email", mbox_paths)
+    seen = set()
+    if mbox_stale:
+        for label, path in MBOX_SOURCES:
+            if not os.path.exists(path):
+                print(f"  (email/{label}: missing at {path})", flush=True)
+                continue
+            nmsg = nuniq = 0
+            for raw in _iter_mbox(path):
+                nmsg += 1
+                before = len(seen)
+                yield from _email_rows(raw, seen)
+                nuniq += len(seen) - before
+            print(f"  email/{label}: {nmsg} msgs → {nuniq} unique-new", flush=True)
+    else:
+        print("  email/mbox: unchanged — archives kept, live Gmail only", flush=True)
+    if GMAIL_LIVE:
+        try:
+            for raw, internal in _gmail_live_messages():
+                yield from _email_rows(raw, seen, internal)
+        except Exception as e:
+            # A live-API failure must never look like "these emails are gone".
+            _PARTIAL_KINDS.add("email")
+            print(f"  email/gmail-live: FAILED ({e}) — archives preserved", flush=True)
 
 # --- Things 3 (the 7k-task goldmine — local SQLite, read-only) ---------------
 # Things3 stores everything in TMTask (type 0=task, 1=project, 2=heading) under a
@@ -1081,7 +1346,11 @@ def cmd_ingest(args):
         pruned = 0
         # Non-code kinds: kind-scoped prune (each has its own SourceUnavailable/
         # SourceUnchanged guard; a skipped kind never reaches completed_kinds).
-        other = [k for k in completed_kinds if k not in ("code", "git_commit")]
+        # _PARTIAL_KINDS are excluded too: a kind that deliberately re-emitted only
+        # PART of itself this run (see the constant's docstring) would otherwise
+        # have the un-emitted part deleted as orphaned.
+        other = [k for k in completed_kinds
+                 if k not in ("code", "git_commit") and k not in _PARTIAL_KINDS]
         if other:
             cur.execute("DELETE FROM chunks WHERE source_kind = ANY(%s) "
                         "AND NOT EXISTS (SELECT 1 FROM _seen s WHERE s.id = chunks.id)", (other,))
