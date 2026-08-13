@@ -79,7 +79,7 @@ Production runs **always-on (CarveOut=1)** with a **CAD-presence cede** (`run_em
   loops on it at the tail. Mark/skip if the backlog stalls near-done.
 
 ## Visibility
-Committed **LOCALLY only — NOT pushed.** The mannaminne remote (`semikolon/ccsearch`) is
+Committed **LOCALLY only — NOT pushed.** The mannaminne remote (`semikolon/mannaminne`, renamed from `ccsearch` 2026-08-13) is
 PUBLIC; these scripts reveal fleet/Mats topology AND the repo hardcodes a FalkorDB dev
 password (`discover_fyr`). Do not push without sanitizing + a visibility audit.
 
