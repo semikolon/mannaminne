@@ -4,6 +4,20 @@ Semantic-embedding backend for mannaminne (and the same-space fallback story for
 Runs Qwen3-Embedding-4B on the Z4's A4000 instead of Darwin's contended GTX-1650 for large
 batch backfills. **Status (2026-06-14): backlog complete — 934,764/934,764 chunks embedded, HNSW built, Z4 server/guard/client stopped.** Darwin remains the live query-embedding fallback/standing endpoint.
 
+**⚡ NEW BACKLOG 2026-08-13 — this runbook is live again.** The live-Gmail backfill (`discover_email`
+now reaches 2014→today through `gws`, 123 338 messages) will produce roughly **450 000 new chunks**.
+Measured drain rate on Darwin: **~0.55 chunks/s** (1 000 chunks in ~31 min — the GTX 1650 running a
+4B model single-slot at `--ctx-size 512` with long chunks; close to that card's floor, not a fault),
+so Darwin alone needs **~200 hours**. The A4000 is the intended instrument.
+
+**Reach status 2026-08-13 (verified):** the Z4 IS a live WireGuard peer — `10.0.0.6`, handshake
+seconds old, traffic flowing. Two blockers sit above it before `ssh z4` works again: the Z4's Windows
+Firewall does not admit the tunnel subnet, and Darwin's `FORWARD` chain drops NEW peer-to-peer
+traffic. Both diagnosed with exact fixes in
+`~/Projects/swhisper-work/docs/z4_transcription_offload_2026_06_27.md` § Access-path STATUS
+2026-08-13. Clear those, repoint the `z4` ssh host to `10.0.0.6`, then follow "Run / check / stop"
+below unchanged.
+
 ## Architecture
 - **Model** — `Qwen3-Embedding-4B-Q4_K_M.gguf`, **byte-identical to Darwin's** (sha256
   `2b0cf8…`). Same GGUF + same llama.cpp pooling ⇒ **same vector space**, so chunks already
