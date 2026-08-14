@@ -4,8 +4,14 @@ Semantic-embedding backend for mannaminne (and the same-space fallback story for
 Runs Qwen3-Embedding-4B on the Z4's A4000 instead of Darwin's contended GTX-1650 for large
 batch backfills. **Status (2026-06-14): backlog complete — 934,764/934,764 chunks embedded, HNSW built, Z4 server/guard/client stopped.** Darwin remains the live query-embedding fallback/standing endpoint.
 
-**⚡ NEW BACKLOG 2026-08-13 — this runbook is live again.** The live-Gmail backfill (`discover_email`
-now reaches 2014→today through `gws`, 123 338 messages) will produce roughly **450 000 new chunks**.
+**⚡ NEW BACKLOG — this runbook is live again. Backfill COMPLETE 2026-08-14.** All 123 338 messages
+fetched (26 000 in the first run, 97 413 in the second after a bug fix, **0 failures**). The twelve-year
+hole is closed: the email corpus now runs continuously **2010-05-16 → 2026-08-13**, 1 797 794 chunks,
+every year populated. Full-text search over all of it is live immediately.
+
+**The real backlog is 1 129 154 chunks pending embed — 2.5× my pre-run estimate of ~450 000.** At
+Darwin's measured 0.55 chunks/s that is **~570 hours**, which is what moves the A4000 from
+nice-to-have to necessary.
 Measured drain rate on Darwin: **~0.55 chunks/s** (1 000 chunks in ~31 min — the GTX 1650 running a
 4B model single-slot at `--ctx-size 512` with long chunks; close to that card's floor, not a fault),
 so Darwin alone needs **~200 hours**. The A4000 is the intended instrument.
