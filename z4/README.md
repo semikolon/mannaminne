@@ -16,6 +16,11 @@ Measured drain rate on Darwin: **~0.55 chunks/s** (1 000 chunks in ~31 min — t
 4B model single-slot at `--ctx-size 512` with long chunks; close to that card's floor, not a fault),
 so Darwin alone needs **~200 hours**. The A4000 is the intended instrument.
 
+**Status 2026-08-16:** embed queue down to **1 066 957 of 2 205 559** chunks (from 1 129 154), so
+Darwin is draining at roughly the measured 0.55/s and will not finish this decade. Z4 still
+unreachable — the Windows firewall step below has not been run. Keyword search covers the whole
+corpus meanwhile; only semantic search lags.
+
 **Reach status 2026-08-13 (verified):** the Z4 IS a live WireGuard peer — `10.0.0.6`, handshake
 seconds old, traffic flowing. Two blockers sit above it before `ssh z4` works again: the Z4's Windows
 Firewall does not admit the tunnel subnet, and Darwin's `FORWARD` chain drops NEW peer-to-peer
