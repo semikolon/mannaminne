@@ -367,13 +367,27 @@ def _is_dataless(path):
     blocks on disk (`st_blocks == 0`), or reports zero size for a file that is
     supposed to have content.
 
-    Load-bearing: `~/Documents` IS iCloud Drive. With iCloud storage full those
-    files go dataless, and a SCHEDULED ingest that reads them gets empty strings —
-    which the orphan-prune then treats as "these documents are gone" and wipes
-    their chunks. That exact hazard is why the Simplenote source was moved to a
-    materialized local copy on 2026-07-15 (design doc § Notes source moved off
-    iCloud). The guard generalizes that one-off fix: a dataless file is SKIPPED,
-    never read as empty, so a full iCloud can no longer silently empty the index."""
+    Load-bearing: `~/Documents` IS iCloud Drive, and its files go dataless.
+
+    ⚠️ CORRECTED 2026-08-16 — the reason is LATENCY, not empty reads. This
+    docstring previously said a read of a dataless file "gets empty strings",
+    inherited from the 2026-07-15 note, whose own wording was conditional
+    ("could hang on download or read empty") — a precaution, never an observation.
+    Measured instead: reading a dataless file **materializes it and returns the
+    CORRECT bytes**. `git hash-object` on a placeholder produced exactly the
+    committed blob hash, with st_blocks going 0 → 8. So a read is safe for
+    correctness.
+
+    What it is NOT safe for is a BULK SCHEDULED job: that read took **3.0 s of
+    wall time for a 4 KB file**, because it is a network download. At the sizes
+    this indexer walks that is ~36 min for the Simplenote notes alone and ~10 h
+    for every .md under $HOME — a nightly job that never finishes, holding the
+    source open the whole time. Hence: skip, and let a targeted tool (git, an
+    editor, a deliberate read-sweep) be what pulls a file down.
+
+    (Unverified, and the reason the guard also protects the prune: what a read
+    returns when the download CANNOT complete — offline, iCloud full, account
+    issue — was not tested. Skipping covers that case either way.)"""
     try:
         st = os.stat(path)
     except OSError:
