@@ -721,3 +721,42 @@ class SoftTermCandidateCapTests(unittest.TestCase):
         self.assertTrue(soft, "the soft-term query must rank a bounded subquery")
         self.assertIn("LIMIT", soft[0])
         self.assertTrue(any(m.SEARCH_SOFT_CANDIDATE_CAP in (p or []) for _, p in captured))
+
+
+class SearchAgainstTheRealIndexTests(unittest.TestCase):
+    """The corpus assertion the search path never had.
+
+    Both 2026-08-16 bugs were invisible to unit tests by construction: the
+    tokeniser bug needed non-ASCII CONTENT, and the ranking bug needed SCALE. Every
+    existing test used English fixtures against synthetic data, so `[a-z0-9]+`
+    passed all of them while shredding half the real corpus, and `ORDER BY ts_rank`
+    over every match looked instant on a handful of rows.
+
+    Skips when the live index is unreachable, so it never blocks an offline run."""
+
+    def _conn(self):
+        try:
+            return m.load_conn()
+        except Exception:
+            self.skipTest("live index unreachable")
+
+    def test_a_swedish_domain_term_actually_matches(self):
+        cur = self._conn().cursor()
+        res = m._keyword_results(cur, "försörjningsstöd", "", [])
+        self.assertGreater(len(res), 0,
+                           "a core Swedish term must match; it returned nothing while "
+                           "the tokeniser was shredding it into 'rs' + 'rjningsst'")
+
+    def test_a_long_swedish_query_stays_under_the_latency_ceiling(self):
+        import time
+        cur = self._conn().cursor()
+        q = "varför är det så att kanske systemet inte kan hantera detta"
+        started = time.time()
+        m._keyword_results(cur, q, "", [])
+        elapsed = time.time() - started
+        # Measured 48–58 s before the candidate cap, 1.65 s after. The ceiling is
+        # deliberately loose: it exists to catch a return to full-match ranking,
+        # not to police normal variance.
+        self.assertLess(elapsed, 10.0,
+                        f"long-query keyword pass took {elapsed:.1f}s — the soft-term "
+                        "candidate cap has probably regressed")
