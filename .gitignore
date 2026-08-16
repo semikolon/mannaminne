@@ -4,3 +4,6 @@ py/__pycache__/
 gemini_free.txt
 __pycache__/
 *.pyc
+
+# Session-local Claude Code state (tier2 analyses reference fleet/personal context — public repo)
+.claude/
