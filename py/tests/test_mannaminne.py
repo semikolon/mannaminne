@@ -682,3 +682,42 @@ class MalformedHeaderTests(unittest.TestCase):
         second = list(m._email_rows(self.RAW, seen))
         self.assertTrue(first)
         self.assertEqual(second, [], "same Message-ID must dedup on the second pass")
+
+
+class SwedishTokenisationTests(unittest.TestCase):
+    """`_TERM_RE` was `[a-z0-9]+`, which silently shredded every Swedish word
+    containing å/ä/ö into fragments that match nothing. Roughly half the corpus is
+    Swedish, so soft-term search was blind to a large slice of it."""
+
+    def test_swedish_words_survive_tokenisation(self):
+        self.assertEqual(m._query_terms("försörjningsstöd"), ["försörjningsstöd"])
+        self.assertEqual(m._query_terms("hälsa"), ["hälsa"])
+        self.assertEqual(m._query_terms("återbetalning"), ["återbetalning"])
+
+    def test_snake_case_still_splits_for_code_search(self):
+        self.assertEqual(m._query_terms("snake_case_name"), ["snake", "case", "name"])
+
+    def test_swedish_function_words_are_dropped_from_soft_terms(self):
+        # `och` alone matched 227 247 chunks and cost 29 s before this list existed.
+        terms = m._soft_terms("varför är det så att systemet inte kan hantera detta")
+        for filler in ("varför", "är", "det", "så", "att", "inte", "kan"):
+            self.assertNotIn(filler, terms)
+        self.assertIn("systemet", terms)
+
+
+class SoftTermCandidateCapTests(unittest.TestCase):
+    def test_the_cap_is_applied_inside_the_ranking_subquery(self):
+        """Ranking must happen over a BOUNDED candidate set. Without the cap,
+        `ORDER BY ts_rank(...)` computes a rank for every match and sorts them all
+        — 18.74 s for one common term, against 0.69 s bounded."""
+        captured = []
+
+        class Cur:
+            def execute(self, sql, params=None): captured.append((sql, params))
+            def fetchall(self): return []
+
+        m._keyword_results(Cur(), "systemet", "", [])
+        soft = [s for s, _ in captured if "candidates" in s]
+        self.assertTrue(soft, "the soft-term query must rank a bounded subquery")
+        self.assertIn("LIMIT", soft[0])
+        self.assertTrue(any(m.SEARCH_SOFT_CANDIDATE_CAP in (p or []) for _, p in captured))

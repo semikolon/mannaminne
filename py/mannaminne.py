@@ -1678,7 +1678,15 @@ def cmd_embed(args):
 
 # --- search -----------------------------------------------------------------
 
-_TERM_RE = re.compile(r"[a-z0-9]+")
+#: ⚠️ Was `[a-z0-9]+`, which SHREDDED every Swedish word containing å, ä or ö —
+#: silently, since the fragments are valid tokens that simply match nothing.
+#: Measured 2026-08-16: `försörjningsstöd` → ['rs', 'rjningsst'] · `hälsa` → ['lsa']
+#: · `varför` → ['varf'] · `böcker` → ['cker']. Roughly half this corpus is Swedish,
+#: and `försörjningsstöd` is among the highest-value query terms in it, so soft-term
+#: search had been quietly blind to a large slice of the material. `\w` with re.UNICODE
+#: keeps letters from any language; the underscore is stripped separately so
+#: snake_case identifiers still split into their parts for code search.
+_TERM_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _QUERY_STOP_TERMS = {
     "a", "about", "an", "and", "are", "as", "at", "be", "but", "by", "can", "did",
     "do", "does", "for", "from", "had", "has", "have", "how", "i", "in",
@@ -1686,9 +1694,39 @@ _QUERY_STOP_TERMS = {
     "to", "was", "were", "what", "when", "where", "which", "who", "why",
     "said", "say", "with", "you",
 }
-_SOFT_QUERY_STOP_TERMS = _QUERY_STOP_TERMS | {
+#: Swedish function words. The list above was English-only, so a Swedish query
+#: sent its own filler straight into a per-term ranking scan: `och` alone matches
+#: 227 247 chunks and cost **29 s** on its own (measured 2026-08-16). Half this
+#: corpus is Swedish, so this is not an edge case.
+_SWEDISH_STOP_TERMS = {
+    "och", "att", "det", "som", "en", "ett", "den", "de", "dem", "är", "var",
+    "för", "med", "på", "av", "till", "från", "om", "men", "eller", "inte",
+    "jag", "du", "han", "hon", "vi", "ni", "man", "sig", "sin", "sitt",
+    "har", "hade", "ska", "skulle", "kan", "kunde", "vill", "ville", "blir",
+    "blev", "här", "där", "när", "vad", "hur", "varför", "vilken", "vilka",
+    "så", "då", "nu", "bara", "också", "efter", "under", "över", "mot",
+    "mig", "min", "mitt", "mina", "dig", "din", "ditt", "vara", "vid", "än",
+}
+_SOFT_QUERY_STOP_TERMS = _QUERY_STOP_TERMS | _SWEDISH_STOP_TERMS | {
     "archive", "find", "local", "look", "remember", "search", "semantic",
 }
+
+#: Cap on how many FTS matches get ranked for ONE soft term.
+#:
+#: `ORDER BY ts_rank(...) DESC LIMIT 12` makes Postgres compute the rank for EVERY
+#: matching row and sort all of them, to return twelve — no index can produce
+#: ts_rank order. So cost tracks the term's match count, not the query's length,
+#: which is why an eleven-word query took 48–58 s while a three-word one took 3.7 s
+#: on the same scope: the long one contained a high-frequency term.
+#:
+#: Measured 2026-08-16, ranking a bounded candidate set instead:
+#:   `och`    18.74 s → 0.69 s  (27×)
+#:   `system`  5.06 s → 0.10 s  (49×)
+#:
+#: The precision cost is close to nil: a term matching six figures of chunks is not
+#: discriminative, and soft terms enter the blend at weight 0.35. Discriminative
+#: terms match few rows and never reach the cap, so they rank exactly as before.
+SEARCH_SOFT_CANDIDATE_CAP = _env_int("MANNAMINNE_SOFT_CANDIDATE_CAP", 5000)
 
 def _query_terms(q: str, limit: int = SEARCH_SOFT_TERM_LIMIT) -> list[str]:
     terms: list[str] = []
@@ -1786,14 +1824,19 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
         _add_keyword_result(results, r, rank, weight=1.6)
 
     for term in _soft_terms(q):
+        # Rank a BOUNDED candidate set, not every match — see
+        # SEARCH_SOFT_CANDIDATE_CAP for the measurements and why precision holds.
         cur.execute(
             f"""SELECT id,source_kind,project,title,left(text,200),created,
                        ts_rank(tsv, to_tsquery('simple',%s)) AS rank,updated
-                FROM chunks
-                WHERE tsv @@ to_tsquery('simple',%s){where_scope}
+                FROM (SELECT id,source_kind,project,title,text,created,tsv,updated
+                      FROM chunks
+                      WHERE tsv @@ to_tsquery('simple',%s){where_scope}
+                      LIMIT %s) AS candidates
                 ORDER BY ts_rank(tsv, to_tsquery('simple',%s)) DESC
                 LIMIT %s""",
-            [term, term, *params_scope, term, SEARCH_SOFT_PER_TERM_LIMIT])
+            [term, term, *params_scope, SEARCH_SOFT_CANDIDATE_CAP,
+             term, SEARCH_SOFT_PER_TERM_LIMIT])
         for rank, r in enumerate(cur.fetchall(), 1):
             _add_keyword_result(results, r, rank, weight=0.35)
     return results
