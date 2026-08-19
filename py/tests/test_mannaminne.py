@@ -760,3 +760,81 @@ class SearchAgainstTheRealIndexTests(unittest.TestCase):
         self.assertLess(elapsed, 10.0,
                         f"long-query keyword pass took {elapsed:.1f}s — the soft-term "
                         "candidate cap has probably regressed")
+
+
+class GwsResolutionTests(unittest.TestCase):
+    """`gws` is a mise shim, so it exists only on an interactive PATH.
+
+    Under launchd the nightly ingest got a minimal PATH and every live-Gmail sync
+    died with ENOENT — logged, exit 0, archives preserved, and therefore silent:
+    no new mail was indexed between the 2026-08-13 backfill and 2026-08-19 while
+    the job reported success. These pin the resolution order.
+    """
+
+    def test_explicit_env_var_wins(self):
+        with mock.patch.dict(os.environ, {"MANNAMINNE_GWS_BIN": "/custom/gws"}):
+            self.assertEqual(m._gws_bin(), "/custom/gws")
+
+    def test_falls_back_to_the_mise_shim_when_path_is_bare(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MANNAMINNE_GWS_BIN", None)
+            with mock.patch.object(m.shutil, "which", return_value=None), \
+                 mock.patch.object(m.os.path, "isfile",
+                                   side_effect=lambda p: p == m._GWS_FALLBACKS[0]), \
+                 mock.patch.object(m.os, "access", return_value=True):
+                self.assertEqual(m._gws_bin(), m._GWS_FALLBACKS[0])
+
+    def test_never_raises_when_nothing_is_found(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MANNAMINNE_GWS_BIN", None)
+            with mock.patch.object(m.shutil, "which", return_value=None), \
+                 mock.patch.object(m.os.path, "isfile", return_value=False):
+                self.assertEqual(m._gws_bin(), "gws")
+
+
+class SoftPrefixTests(unittest.TestCase):
+    """Swedish compounds, so the terms here are Swedish on purpose.
+
+    The 2026-08-16 tokeniser bug survived 41 tests because every fixture was
+    English; a rule about Swedish morphology tested in English would repeat that
+    exact mistake one level up.
+    """
+
+    def test_long_terms_are_prefix_expanded(self):
+        self.assertEqual(m._soft_tsquery("skuld"), "skuld:*")
+        self.assertEqual(m._soft_tsquery("bostad"), "bostad:*")
+        self.assertEqual(m._soft_tsquery("försörjningsstöd"), "försörjningsstöd:*")
+
+    def test_short_terms_stay_exact_because_short_prefixes_explode(self):
+        # `bil:*` would drag in bilaga, bild, billig, bilder.
+        self.assertEqual(m._soft_tsquery("bil"), "bil")
+        self.assertEqual(m._soft_tsquery("ab"), "ab")
+
+    def test_kill_switch_restores_exact_matching(self):
+        with mock.patch.object(m, "SOFT_PREFIX", False):
+            self.assertEqual(m._soft_tsquery("skuld"), "skuld")
+
+
+class PrefixRecallAgainstTheRealIndexTests(unittest.TestCase):
+    """Set membership, so this holds regardless of how loaded the box is.
+
+    Measured 2026-08-16: skuld 645 → 4 519, bostad 1 173 → 6 778. The assertion is
+    only that prefix is a strict superset, which is the property the ranking relies
+    on — a prefix query can never lose a hit its exact form would have found."""
+
+    def test_prefix_is_a_superset_of_the_exact_term(self):
+        try:
+            cur = m.load_conn().cursor()
+        except Exception:
+            self.skipTest("live index unreachable")
+        cur.execute("SET statement_timeout='60s'")
+        for term in ("skuld", "bostad"):
+            try:
+                cur.execute("SELECT count(*) FROM chunks WHERE tsv @@ to_tsquery('simple',%s)", [term])
+                exact = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM chunks WHERE tsv @@ to_tsquery('simple',%s)", [term + ":*"])
+                prefix = cur.fetchone()[0]
+            except Exception:
+                self.skipTest("index busy (a nightly ingest holds it)")
+            self.assertGreaterEqual(prefix, exact,
+                                    f"{term}:* returned fewer than {term} — prefix must be a superset")

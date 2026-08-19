@@ -20,7 +20,7 @@ Design: ~/dotfiles/docs/personal_archives_semantic_search_2026_06_10.md § v2.
 """
 from __future__ import annotations
 import os, sys, json, glob, hashlib, argparse, concurrent.futures, time, urllib.request, urllib.error, subprocess
-import re, email, html as _htmllib
+import re, email, shutil, html as _htmllib
 from email import policy as _emailpolicy
 import email.utils as _emailutils
 from pathlib import Path
@@ -751,11 +751,35 @@ def _save_gmail_state(state):
     os.replace(tmp, _GMAIL_STATE)
 
 
+#: `gws` is a mise SHIM, so it exists only on an interactive PATH. Under launchd
+#: the nightly ingest got a minimal PATH and every live-Gmail sync died with
+#: `[Errno 2] No such file or directory: 'gws'` — logged, exit 0, archives
+#: preserved, and therefore invisible: no new mail was indexed between the
+#: 2026-08-13 backfill and 2026-08-19, while the job reported success. A
+#: load-bearing external tool must not depend on an ambient PATH.
+_GWS_FALLBACKS = (
+    os.path.expanduser("~/.local/share/mise/shims/gws"),
+    os.path.expanduser("~/.local/bin/gws"),
+    "/opt/homebrew/bin/gws",
+)
+
+def _gws_bin() -> str:
+    explicit = os.environ.get("MANNAMINNE_GWS_BIN")
+    if explicit:
+        return explicit
+    found = shutil.which("gws")
+    if found:
+        return found
+    for cand in _GWS_FALLBACKS:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return "gws"          # let the caller fail with the familiar ENOENT
+
 def _gws_json(args, timeout=60):
     """Run a `gws` command and parse its JSON. gws prints a keyring banner before
     the payload on some paths, so parse from the first brace rather than the first
     byte."""
-    out = subprocess.run(["gws", *args], capture_output=True, text=True, timeout=timeout)
+    out = subprocess.run([_gws_bin(), *args], capture_output=True, text=True, timeout=timeout)
     if out.returncode != 0:
         raise RuntimeError((out.stderr or out.stdout or "gws failed").strip()[:200])
     s = out.stdout
@@ -1613,9 +1637,69 @@ def _embed_one_truncated(item, exc):
 def _vec(v):
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
 
+#: Markers that identify BROADCAST mail (newsletters, receipts, notifications).
+#: Measured 2026-08-16 over the whole pending queue: 84 812 of 110 105 messages
+#: carry one, and they account for 914 010 of 1 044 651 pending chunks — **87%**.
+#: The queue had no ORDER BY at all, so it drained in heap order, which after the
+#: Gmail backfill meant newest-junk-first: three days of GPU went into discount
+#: codes while genuine correspondence stayed unsearchable by semantics.
+#: This ORDERS, it never excludes — some noreply mail matters (bank and myndighet
+#: notifications), so the bulk simply drains behind, forever if need be.
+_BULK_MAIL_MARKERS = ("%unsubscribe%", "%avregistrera%", "%noreply%",
+                      "%no-reply%", "%prenumerera%")
+EMBED_CLASSIFY_TIMEOUT = _env_int("MANNAMINNE_EMBED_CLASSIFY_TIMEOUT", 900)
+
+def _ensure_embed_priority(conn, cur):
+    """Give the embed queue a priority, cheaply and idempotently.
+
+    Bulk-ness is a property of the MESSAGE, not the chunk (the unsubscribe footer
+    lands in one chunk of many), so the verdict is rolled up over the id prefix
+    and applied to every chunk of that message. Only unclassified pending rows are
+    touched, so the first run pays for the backlog and every later run is trivial.
+    A classify failure is never fatal: embedding still works, it just loses its
+    ordering, which is exactly today's behaviour.
+    """
+    cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embed_priority smallint")
+    cur.execute("CREATE INDEX IF NOT EXISTS chunks_embed_queue "
+                "ON chunks (embed_priority) WHERE embedding IS NULL")
+    conn.commit()
+    cur.execute("SELECT count(*) FROM chunks "
+                "WHERE embedding IS NULL AND embed_priority IS NULL AND source_kind='email'")
+    todo = cur.fetchone()[0]
+    if not todo:
+        return
+    print(f"  classifying {todo} unprioritised mail chunks "
+          f"(bulk drains last; this is a one-time cost per backlog)", flush=True)
+    bulk_expr = " OR ".join(["text ILIKE %s"] * len(_BULK_MAIL_MARKERS))
+    try:
+        cur.execute(f"SET LOCAL statement_timeout='{EMBED_CLASSIFY_TIMEOUT}s'")
+        cur.execute(f"""
+            WITH msg AS (
+              SELECT split_part(id,'#',1) AS mid, bool_or({bulk_expr}) AS bulk
+              FROM chunks
+              WHERE source_kind='email' AND embedding IS NULL
+              GROUP BY 1)
+            UPDATE chunks c SET embed_priority = CASE WHEN m.bulk THEN 1 ELSE 0 END
+            FROM msg m
+            WHERE split_part(c.id,'#',1) = m.mid
+              AND c.embedding IS NULL AND c.embed_priority IS NULL""",
+            list(_BULK_MAIL_MARKERS))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"  classify skipped ({str(e)[:80]}) — embedding continues unordered",
+              flush=True)
+        return
+    cur.execute("""SELECT COALESCE(embed_priority,0), count(*) FROM chunks
+                   WHERE embedding IS NULL GROUP BY 1 ORDER BY 1""")
+    for pri, n in cur.fetchall():
+        print(f"    priority {pri} ({'correspondence' if pri == 0 else 'bulk'}): {n}",
+              flush=True)
+
 def cmd_embed(args):
     conn = load_conn()
     cur = conn.cursor()
+    _ensure_embed_priority(conn, cur)
     cur.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL")
     pending = cur.fetchone()[0]
     max_total = getattr(args, "limit", 0) if args else 0
@@ -1629,7 +1713,8 @@ def cmd_embed(args):
             if remaining <= 0:
                 break
             select_limit = min(select_limit, remaining)
-        cur.execute("SELECT id,text FROM chunks WHERE embedding IS NULL LIMIT %s", (select_limit,))
+        cur.execute("SELECT id,text FROM chunks WHERE embedding IS NULL "
+                    "ORDER BY COALESCE(embed_priority,0) ASC LIMIT %s", (select_limit,))
         rows = cur.fetchall()
         conn.commit()  # close the read transaction before slow network embedding work
         if not rows:
@@ -1727,6 +1812,28 @@ _SOFT_QUERY_STOP_TERMS = _QUERY_STOP_TERMS | _SWEDISH_STOP_TERMS | {
 #: discriminative, and soft terms enter the blend at weight 0.35. Discriminative
 #: terms match few rows and never reach the cap, so they rank exactly as before.
 SEARCH_SOFT_CANDIDATE_CAP = _env_int("MANNAMINNE_SOFT_CANDIDATE_CAP", 5000)
+
+#: Swedish builds meaning by COMPOUNDING, not by inflecting, which is precisely
+#: what exact-token matching misses: `skuld` never reaches `skulder`,
+#: `skuldsanering`, `skuldsatt`. Measured recall against the live index
+#: (2026-08-16, set membership so load-independent): `skuld` 645 → 4 519 (7.0x),
+#: `bostad` 1 173 → 6 778 (5.8x), `hyra` 2 882 → 4 060 (1.4x).
+#: A prefix query is a superset of its exact term, so this ADDS recall without
+#: losing any hit, and it stays ONE query per term — no extra round trips.
+#: Swedish STEMMING was the obvious alternative and was measured and rejected:
+#: the snowball stemmer unifies only 1 of 4 real pairs (`skuld`/`skulder` yes;
+#: `bostad`/`bostäder`, `hyra`/`hyran`, `försörjningsstöd`/`försörjningsstödet`
+#: no) and mangles English in a mixed corpus (`files` → `fil`).
+#: Short prefixes explode (`bil:*` → bilaga, bild, billig), hence the floor.
+#: Kill-switch: MANNAMINNE_SOFT_PREFIX=0 restores exact-only matching.
+SOFT_PREFIX = os.environ.get("MANNAMINNE_SOFT_PREFIX", "1") not in ("0", "false", "")
+SOFT_PREFIX_MIN_CHARS = _env_int("MANNAMINNE_SOFT_PREFIX_MIN_CHARS", 4)
+
+def _soft_tsquery(term: str) -> str:
+    """Prefix-expand a soft term when it is long enough to be discriminating."""
+    if SOFT_PREFIX and len(term) >= SOFT_PREFIX_MIN_CHARS:
+        return f"{term}:*"
+    return term
 
 def _query_terms(q: str, limit: int = SEARCH_SOFT_TERM_LIMIT) -> list[str]:
     terms: list[str] = []
@@ -1826,6 +1933,7 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
     for term in _soft_terms(q):
         # Rank a BOUNDED candidate set, not every match — see
         # SEARCH_SOFT_CANDIDATE_CAP for the measurements and why precision holds.
+        tsq = _soft_tsquery(term)
         cur.execute(
             f"""SELECT id,source_kind,project,title,left(text,200),created,
                        ts_rank(tsv, to_tsquery('simple',%s)) AS rank,updated
@@ -1835,8 +1943,8 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
                       LIMIT %s) AS candidates
                 ORDER BY ts_rank(tsv, to_tsquery('simple',%s)) DESC
                 LIMIT %s""",
-            [term, term, *params_scope, SEARCH_SOFT_CANDIDATE_CAP,
-             term, SEARCH_SOFT_PER_TERM_LIMIT])
+            [tsq, tsq, *params_scope, SEARCH_SOFT_CANDIDATE_CAP,
+             tsq, SEARCH_SOFT_PER_TERM_LIMIT])
         for rank, r in enumerate(cur.fetchall(), 1):
             _add_keyword_result(results, r, rank, weight=0.35)
     return results
