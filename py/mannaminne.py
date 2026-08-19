@@ -2149,6 +2149,19 @@ def cmd_eval(args):
                                 keyword=args.keyword, limit=args.k, conn=conn)
         latency_ms = (time.perf_counter() - t0) * 1000
         latencies.append(latency_ms)
+        # The result rows carry only left(text,200), so a topic word deeper in the
+        # chunk read as a MISS even when the right document was returned at rank 1.
+        # Measured 2026-08-19: 'hälsa' and 'wireguard' both exist in the corpus and
+        # both were retrieved, yet failed their label on the truncation alone. Widen
+        # the blob with the full text before judging, so the instrument measures
+        # retrieval rather than snippet luck.
+        ids = [r["r"][0] for r in ranked]
+        if ids:
+            cur = conn.cursor()
+            cur.execute("SELECT id,text FROM chunks WHERE id = ANY(%s)", [ids])
+            full = dict(cur.fetchall())
+            for r in ranked:
+                r["r"] = tuple(r["r"]) + (full.get(r["r"][0], ""),)
         rank = _hit_rank(ranked, expectations)
         hit = rank is not None
         hits += 1 if hit else 0
