@@ -1945,27 +1945,41 @@ def _add_keyword_result(results, row, rank: int, weight: float, exact: bool = Fa
     x["kwscore"] = max(float(row[6] or 0.0) if len(row) > 6 else 0.0, x.get("kwscore", 0.0))
     x["exact"] = bool(x.get("exact") or exact)
 
+#: A snippet is a DECISION SURFACE, not decoration: it is the only evidence the
+#: agent has when choosing whether this hit is worth opening. `left(text,200)`
+#: showed the chunk's OPENING, which is unrelated to why it matched — measured
+#: 2026-08-19, a hit for "hälsa" led with a KRAV report URL while the sentence
+#: containing the word sat 400 chars in. Same token budget, near-zero signal.
+#: ts_headline centres the window on the match instead, costs the same (0.01 s on
+#: 12 rows), and marks elision with … so the reader knows it is a window and not
+#: the room. Sieve (arXiv 2608.02751) measured query-focused snippets + selective
+#: fetch at HIGHER accuracy with 20.7–50.6 % FEWER tokens, and removing the
+#: query-focused snippet alone cost 2.9–6.8 accuracy points.
+SNIPPET_SQL = ("ts_headline('simple',text,plainto_tsquery('simple',%s),"
+               "'StartSel=«,StopSel=»,MaxWords=32,MinWords=14,"
+               "MaxFragments=3,FragmentDelimiter= … ')")
+
 def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
     results = {}
     if _should_exact_phrase(q):
         cur.execute(
-            f"""SELECT id,source_kind,project,title,left(text,200),created,1.0 AS rank,updated
+            f"""SELECT id,source_kind,project,title,{SNIPPET_SQL},created,1.0 AS rank,updated
                 FROM chunks
                 WHERE text ILIKE %s{where_scope}
                 ORDER BY length(text) ASC
                 LIMIT %s""",
-            [f"%{q}%", *params_scope, min(SEARCH_KEYWORD_LIMIT, 25)])
+            [q, f"%{q}%", *params_scope, min(SEARCH_KEYWORD_LIMIT, 25)])
         for rank, r in enumerate(cur.fetchall(), 1):
             _add_keyword_result(results, r, rank, weight=2.4, exact=True)
 
     cur.execute(
-        f"""SELECT id,source_kind,project,title,left(text,200),created,
+        f"""SELECT id,source_kind,project,title,{SNIPPET_SQL},created,
                    ts_rank(tsv, plainto_tsquery('simple',%s)) AS rank,updated
             FROM chunks
             WHERE tsv @@ plainto_tsquery('simple',%s){where_scope}
             ORDER BY ts_rank(tsv, plainto_tsquery('simple',%s)) DESC
             LIMIT %s""",
-        [q, q, *params_scope, q, SEARCH_KEYWORD_LIMIT])
+        [q, q, q, *params_scope, q, SEARCH_KEYWORD_LIMIT])
     for rank, r in enumerate(cur.fetchall(), 1):
         _add_keyword_result(results, r, rank, weight=1.6)
 
@@ -1974,7 +1988,7 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
         # SEARCH_SOFT_CANDIDATE_CAP for the measurements and why precision holds.
         tsq = _soft_tsquery(term)
         cur.execute(
-            f"""SELECT id,source_kind,project,title,left(text,200),created,
+            f"""SELECT id,source_kind,project,title,{SNIPPET_SQL},created,
                        ts_rank(tsv, to_tsquery('simple',%s)) AS rank,updated
                 FROM (SELECT id,source_kind,project,title,text,created,tsv,updated
                       FROM chunks
@@ -1982,7 +1996,7 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
                       LIMIT %s) AS candidates
                 ORDER BY ts_rank(tsv, to_tsquery('simple',%s)) DESC
                 LIMIT %s""",
-            [tsq, tsq, *params_scope, SEARCH_SOFT_CANDIDATE_CAP,
+            [q, tsq, tsq, *params_scope, SEARCH_SOFT_CANDIDATE_CAP,
              tsq, SEARCH_SOFT_PER_TERM_LIMIT])
         for rank, r in enumerate(cur.fetchall(), 1):
             _add_keyword_result(results, r, rank, weight=0.35)
@@ -2017,11 +2031,11 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
             except Exception:
                 pass
             cur.execute(
-                f"""SELECT id,source_kind,project,title,left(text,200),created,
+                f"""SELECT id,source_kind,project,title,{SNIPPET_SQL},created,
                            1-(embedding<=>%s::vector) AS sem,updated FROM chunks
                     WHERE embedding IS NOT NULL{where_scope}
                     ORDER BY embedding<=>%s::vector LIMIT %s""",
-                [qe, *params_scope, qe, SEARCH_SEMANTIC_LIMIT])
+                [q, qe, *params_scope, qe, SEARCH_SEMANTIC_LIMIT])
             for rank, r in enumerate(cur.fetchall(), 1):
                 rid = r[0]
                 if rid in results:
