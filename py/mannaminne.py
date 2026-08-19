@@ -1647,7 +1647,17 @@ def _vec(v):
 #: notifications), so the bulk simply drains behind, forever if need be.
 _BULK_MAIL_MARKERS = ("%unsubscribe%", "%avregistrera%", "%noreply%",
                       "%no-reply%", "%prenumerera%")
-EMBED_CLASSIFY_TIMEOUT = _env_int("MANNAMINNE_EMBED_CLASSIFY_TIMEOUT", 900)
+#: Batched on purpose. The rollup alone is ~40 s, which made a single UPDATE look
+#: affordable — measured 2026-08-19 it needs **more than 8 minutes** and was killed
+#: by its own timeout, rolling the whole thing back. Updating ~1 M rows of a 23 GB
+#: table rewrites every touched tuple, and that write cost is the real bottleneck,
+#: not the rollup. Committing per batch makes the pass resumable, keeps it inside a
+#: nightly window, and means an interruption costs one batch instead of everything.
+EMBED_CLASSIFY_BATCH = _env_int("MANNAMINNE_EMBED_CLASSIFY_BATCH", 20000)
+EMBED_CLASSIFY_MIN_BATCH = _env_int("MANNAMINNE_EMBED_CLASSIFY_MIN_BATCH", 500)
+EMBED_CLASSIFY_MAX_SECONDS = _env_float("MANNAMINNE_EMBED_CLASSIFY_MAX_SECONDS", 600.0,
+                                        min_value=0.0)
+EMBED_CLASSIFY_TIMEOUT = _env_int("MANNAMINNE_EMBED_CLASSIFY_TIMEOUT", 180)
 
 def _ensure_embed_priority(conn, cur):
     """Give the embed queue a priority, cheaply and idempotently.
@@ -1668,28 +1678,57 @@ def _ensure_embed_priority(conn, cur):
     todo = cur.fetchone()[0]
     if not todo:
         return
-    print(f"  classifying {todo} unprioritised mail chunks "
-          f"(bulk drains last; this is a one-time cost per backlog)", flush=True)
-    bulk_expr = " OR ".join(["text ILIKE %s"] * len(_BULK_MAIL_MARKERS))
-    try:
-        cur.execute(f"SET LOCAL statement_timeout='{EMBED_CLASSIFY_TIMEOUT}s'")
-        cur.execute(f"""
-            WITH msg AS (
-              SELECT split_part(id,'#',1) AS mid, bool_or({bulk_expr}) AS bulk
-              FROM chunks
-              WHERE source_kind='email' AND embedding IS NULL
-              GROUP BY 1)
-            UPDATE chunks c SET embed_priority = CASE WHEN m.bulk THEN 1 ELSE 0 END
-            FROM msg m
-            WHERE split_part(c.id,'#',1) = m.mid
-              AND c.embedding IS NULL AND c.embed_priority IS NULL""",
-            list(_BULK_MAIL_MARKERS))
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"  classify skipped ({str(e)[:80]}) — embedding continues unordered",
-              flush=True)
-        return
+    print(f"  classifying {todo} unprioritised mail chunks in batches of "
+          f"{EMBED_CLASSIFY_BATCH} (bulk drains last; resumable)", flush=True)
+    bulk_expr = " OR ".join(["c.text ILIKE %s"] * len(_BULK_MAIL_MARKERS))
+    started = time.monotonic()
+    done = 0
+    size = EMBED_CLASSIFY_BATCH
+    while True:
+        try:
+            cur.execute(f"SET statement_timeout='{EMBED_CLASSIFY_TIMEOUT}s'")
+            cur.execute(f"""
+                WITH batch AS (
+                  SELECT id FROM chunks
+                  WHERE source_kind='email' AND embedding IS NULL
+                    AND embed_priority IS NULL
+                  ORDER BY id LIMIT %s),
+                msg AS (
+                  SELECT split_part(c.id,'#',1) AS mid, bool_or({bulk_expr}) AS bulk
+                  FROM chunks c JOIN batch b ON b.id = c.id
+                  GROUP BY 1)
+                UPDATE chunks c SET embed_priority = CASE WHEN m.bulk THEN 1 ELSE 0 END
+                FROM msg m, batch b
+                WHERE c.id = b.id AND split_part(c.id,'#',1) = m.mid""",
+                [size, *_BULK_MAIL_MARKERS])
+            n = cur.rowcount
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            # Measured 2026-08-19: under an autovacuum storm even 2 000 rows blew a
+            # 120 s timeout, while the same shape is quick on a quiet box. A fixed
+            # batch therefore either stalls on a busy night or crawls on a calm one.
+            # Halving on failure lets the pass find whatever size the box can take
+            # tonight, and only gives up once even the floor is unreachable — the
+            # difference between a feature that works unattended and one that
+            # silently never runs.
+            if size > EMBED_CLASSIFY_MIN_BATCH:
+                size = max(EMBED_CLASSIFY_MIN_BATCH, size // 2)
+                print(f"    batch too slow ({str(e)[:40]}) — retrying at {size}",
+                      flush=True)
+                continue
+            print(f"  classify stopped after {done} ({str(e)[:70]}) — "
+                  f"resumes next run; embedding continues unordered", flush=True)
+            break
+        if not n:
+            break
+        done += n
+        print(f"    classified {done}/{todo}", flush=True)
+        if EMBED_CLASSIFY_MAX_SECONDS and \
+           (time.monotonic() - started) >= EMBED_CLASSIFY_MAX_SECONDS:
+            print(f"    classify budget reached — {todo - done} left for next run",
+                  flush=True)
+            break
     cur.execute("""SELECT COALESCE(embed_priority,0), count(*) FROM chunks
                    WHERE embedding IS NULL GROUP BY 1 ORDER BY 1""")
     for pri, n in cur.fetchall():
