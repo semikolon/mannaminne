@@ -1637,108 +1637,86 @@ def _embed_one_truncated(item, exc):
 def _vec(v):
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
 
-#: Markers that identify BROADCAST mail (newsletters, receipts, notifications).
-#: Measured 2026-08-16 over the whole pending queue: 84 812 of 110 105 messages
-#: carry one, and they account for 914 010 of 1 044 651 pending chunks — **87%**.
-#: The queue had no ORDER BY at all, so it drained in heap order, which after the
-#: Gmail backfill meant newest-junk-first: three days of GPU went into discount
-#: codes while genuine correspondence stayed unsearchable by semantics.
-#: This ORDERS, it never excludes — some noreply mail matters (bank and myndighet
-#: notifications), so the bulk simply drains behind, forever if need be.
-_BULK_MAIL_MARKERS = ("%unsubscribe%", "%avregistrera%", "%noreply%",
-                      "%no-reply%", "%prenumerera%")
-#: Batched on purpose. The rollup alone is ~40 s, which made a single UPDATE look
-#: affordable — measured 2026-08-19 it needs **more than 8 minutes** and was killed
-#: by its own timeout, rolling the whole thing back. Updating ~1 M rows of a 23 GB
-#: table rewrites every touched tuple, and that write cost is the real bottleneck,
-#: not the rollup. Committing per batch makes the pass resumable, keeps it inside a
-#: nightly window, and means an interruption costs one batch instead of everything.
-EMBED_CLASSIFY_BATCH = _env_int("MANNAMINNE_EMBED_CLASSIFY_BATCH", 20000)
-EMBED_CLASSIFY_MIN_BATCH = _env_int("MANNAMINNE_EMBED_CLASSIFY_MIN_BATCH", 500)
-EMBED_CLASSIFY_MAX_SECONDS = _env_float("MANNAMINNE_EMBED_CLASSIFY_MAX_SECONDS", 600.0,
-                                        min_value=0.0)
-EMBED_CLASSIFY_TIMEOUT = _env_int("MANNAMINNE_EMBED_CLASSIFY_TIMEOUT", 180)
+#: Which mail deserves the expensive machinery?
+#:
+#: The first attempt stored a per-MESSAGE fact on every CHUNK — 2.2 M writes to
+#: record 110 k facts, against the most write-hostile table in the system.
+#: Measured 2026-08-20: 139 s to update 5 000 rows, i.e. 70 nights for the
+#: backlog. A message-level table is ~300 k tiny rows and populates in one pass.
+#:
+#: It also replaces the marker heuristic, which was simply wrong. "Contains an
+#: unsubscribe link" detects MACHINE-SENT; it was being used to judge WORTHLESS.
+#: Measured, it condemned gmail.com (real people), apoex.se (Fredrik's old job)
+#: and talk.theborderland.se (his community). Sender domain says WHO wrote, which
+#: is the question actually being asked.
+#:
+#: Exclusion here is from EMBEDDING only. Keyword search still covers every word;
+#: what a skipped message loses is search-by-meaning, which for a Substack essay
+#: or a Papertrail alert is close to worthless. Fully reversible: clear the table
+#: and the next embed pass picks them up.
+EMAIL_CLASS_CONFIG = os.path.expanduser("~/.config/mannaminne/email_classes.txt")
+EMBED_SKIP_CLASSES = {"telemetry", "reading"}
 
-def _ensure_embed_priority(conn, cur):
-    """Give the embed queue a priority, cheaply and idempotently.
+def _load_email_classes() -> dict:
+    """domain → class, from the user-editable config. Absent file = classify nothing."""
+    out = {}
+    try:
+        with open(EMAIL_CLASS_CONFIG, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) == 2:
+                    out[parts[1].strip().lower()] = parts[0].strip().lower()
+    except FileNotFoundError:
+        pass
+    return out
 
-    Bulk-ness is a property of the MESSAGE, not the chunk (the unsubscribe footer
-    lands in one chunk of many), so the verdict is rolled up over the id prefix
-    and applied to every chunk of that message. Only unclassified pending rows are
-    touched, so the first run pays for the backlog and every later run is trivial.
-    A classify failure is never fatal: embedding still works, it just loses its
-    ordering, which is exactly today's behaviour.
-    """
-    cur.execute("ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embed_priority smallint")
-    cur.execute("CREATE INDEX IF NOT EXISTS chunks_embed_queue "
-                "ON chunks (embed_priority) WHERE embedding IS NULL")
+def _ensure_email_class(conn, cur, verbose=True):
+    """Populate the message-level class table. Cheap, idempotent, resumable."""
+    cur.execute("""CREATE TABLE IF NOT EXISTS email_class (
+                     mid text PRIMARY KEY, domain text, class text)""")
+    cur.execute("CREATE INDEX IF NOT EXISTS email_class_class ON email_class (class)")
     conn.commit()
-    cur.execute("SELECT count(*) FROM chunks "
-                "WHERE embedding IS NULL AND embed_priority IS NULL AND source_kind='email'")
+    classes = _load_email_classes()
+    if not classes:
+        return
+    cur.execute("""SELECT count(*) FROM chunks c WHERE c.source_kind='email' AND c.chunk_idx=0
+                   AND NOT EXISTS (SELECT 1 FROM email_class e
+                                   WHERE e.mid = split_part(c.id,'#',1))""")
     todo = cur.fetchone()[0]
     if not todo:
         return
-    print(f"  classifying {todo} unprioritised mail chunks in batches of "
-          f"{EMBED_CLASSIFY_BATCH} (bulk drains last; resumable)", flush=True)
-    bulk_expr = " OR ".join(["c.text ILIKE %s"] * len(_BULK_MAIL_MARKERS))
-    started = time.monotonic()
-    done = 0
-    size = EMBED_CLASSIFY_BATCH
-    while True:
-        try:
-            cur.execute(f"SET statement_timeout='{EMBED_CLASSIFY_TIMEOUT}s'")
-            cur.execute(f"""
-                WITH batch AS (
-                  SELECT id FROM chunks
-                  WHERE source_kind='email' AND embedding IS NULL
-                    AND embed_priority IS NULL
-                  ORDER BY id LIMIT %s),
-                msg AS (
-                  SELECT split_part(c.id,'#',1) AS mid, bool_or({bulk_expr}) AS bulk
-                  FROM chunks c JOIN batch b ON b.id = c.id
-                  GROUP BY 1)
-                UPDATE chunks c SET embed_priority = CASE WHEN m.bulk THEN 1 ELSE 0 END
-                FROM msg m, batch b
-                WHERE c.id = b.id AND split_part(c.id,'#',1) = m.mid""",
-                [size, *_BULK_MAIL_MARKERS])
-            n = cur.rowcount
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            # Measured 2026-08-19: under an autovacuum storm even 2 000 rows blew a
-            # 120 s timeout, while the same shape is quick on a quiet box. A fixed
-            # batch therefore either stalls on a busy night or crawls on a calm one.
-            # Halving on failure lets the pass find whatever size the box can take
-            # tonight, and only gives up once even the floor is unreachable — the
-            # difference between a feature that works unattended and one that
-            # silently never runs.
-            if size > EMBED_CLASSIFY_MIN_BATCH:
-                size = max(EMBED_CLASSIFY_MIN_BATCH, size // 2)
-                print(f"    batch too slow ({str(e)[:40]}) — retrying at {size}",
-                      flush=True)
-                continue
-            print(f"  classify stopped after {done} ({str(e)[:70]}) — "
-                  f"resumes next run; embedding continues unordered", flush=True)
-            break
-        if not n:
-            break
-        done += n
-        print(f"    classified {done}/{todo}", flush=True)
-        if EMBED_CLASSIFY_MAX_SECONDS and \
-           (time.monotonic() - started) >= EMBED_CLASSIFY_MAX_SECONDS:
-            print(f"    classify budget reached — {todo - done} left for next run",
-                  flush=True)
-            break
-    cur.execute("""SELECT COALESCE(embed_priority,0), count(*) FROM chunks
-                   WHERE embedding IS NULL GROUP BY 1 ORDER BY 1""")
-    for pri, n in cur.fetchall():
-        print(f"    priority {pri} ({'correspondence' if pri == 0 else 'bulk'}): {n}",
-              flush=True)
+    if verbose:
+        print(f"  classifying {todo} message(s) by sender domain", flush=True)
+    # One pass over the header chunks: extract the From: domain, map it, store it.
+    cur.execute(r"""
+        INSERT INTO email_class (mid, domain, class)
+        SELECT split_part(c.id,'#',1),
+               lower(substring(c.text from 'From:[^@
+]*@([A-Za-z0-9._-]+)')),
+               'unknown'
+        FROM chunks c
+        WHERE c.source_kind='email' AND c.chunk_idx=0
+        ON CONFLICT (mid) DO NOTHING""")
+    conn.commit()
+    # Apply the config. A domain SUFFIX match, so mail.substack.com counts too.
+    for dom, cls in classes.items():
+        cur.execute("""UPDATE email_class SET class=%s
+                       WHERE class <> %s AND (domain = %s OR domain LIKE %s)""",
+                    [cls, cls, dom, "%." + dom])
+    conn.commit()
+    if verbose:
+        cur.execute("SELECT class, count(*) FROM email_class GROUP BY 1 ORDER BY 2 DESC")
+        for cls, n in cur.fetchall():
+            mark = "  (skipped for embedding)" if cls in EMBED_SKIP_CLASSES else ""
+            print(f"    {cls}: {n} messages{mark}", flush=True)
 
 def cmd_embed(args):
     conn = load_conn()
     cur = conn.cursor()
-    _ensure_embed_priority(conn, cur)
+    _ensure_email_class(conn, cur)
     cur.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL")
     pending = cur.fetchone()[0]
     max_total = getattr(args, "limit", 0) if args else 0
@@ -1752,8 +1730,13 @@ def cmd_embed(args):
             if remaining <= 0:
                 break
             select_limit = min(select_limit, remaining)
-        cur.execute("SELECT id,text FROM chunks WHERE embedding IS NULL "
-                    "ORDER BY COALESCE(embed_priority,0) ASC LIMIT %s", (select_limit,))
+        # Skip, don't sort. Ordering still queues the junk; filtering never does.
+        cur.execute("""SELECT c.id,c.text FROM chunks c
+                       WHERE c.embedding IS NULL
+                         AND NOT EXISTS (SELECT 1 FROM email_class e
+                                         WHERE e.mid = split_part(c.id,'#',1)
+                                           AND e.class = ANY(%s))
+                       LIMIT %s""", (list(EMBED_SKIP_CLASSES), select_limit))
         rows = cur.fetchall()
         conn.commit()  # close the read transaction before slow network embedding work
         if not rows:
