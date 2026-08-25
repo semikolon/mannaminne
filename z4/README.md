@@ -81,7 +81,10 @@ stoppar eller åsidosätter aldrig vakten.
   --batch-size 2048` (A4000 tensor cores; Darwin's single-stream/batch-2 config throttled it
   to ~3/sec — see "throughput" below).
 - **Reach** — the Z4's :8081 is NOT WAN-exposed (only ssh is); the Mac client reaches it via
-  an SSH tunnel `ssh -L 8081:127.0.0.1:8081 z4` (self-healing supervisor loop on the Mac).
+  an SSH tunnel `ssh -L 8081:127.0.0.1:8081 z4`, kept alive by the launchd agent
+  `com.fredrikbranstrom.z4-embed-tunnel` (`~/Library/LaunchAgents/`, KeepAlive + ServerAliveInterval).
+  Built 2026-08-25 after an ad-hoc tunnel died and stalled the backfill at 15 952 chunks with
+  "connection refused" while both ends were healthy — only the pipe between them had gone.
 - **Client** — `mannaminne embed` on the Mac (psycopg → Darwin Postgres `:5440`), batch-of-8,
   `MANNAMINNE_EMBED_URL=http://127.0.0.1:8081/v1/embeddings`, run under `caffeinate`, backs
   off 30s when the server is down/ceded. Pipeline proven (commits land).
