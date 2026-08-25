@@ -29,6 +29,34 @@ traffic. Both diagnosed with exact fixes in
 2026-08-13. Clear those, repoint the `z4` ssh host to `10.0.0.6`, then follow "Run / check / stop"
 below unchanged.
 
+## ⚡ ÅTKOMST LÖST + nattfönster (2026-08-25)
+
+**`ssh z4` fungerar igen.** Vägen in är **pappas egen router-VPN**, inte den utåtringande tunneln som
+den här körboken förutsatte. CGNAT-diagnosen som blockerat i två månader var fel — TCP 443 till hans
+adress svarar, alltså är linjen nåbar; det är port 2224 ensam som inte är vidarebefordrad. Full
+utredning: `~/dotfiles/docs/z4_atkomst_och_darwin_avbrott_2026-08-25.md`.
+
+Tunneln på Macen: `~/.config/wireguard-mac/mzvpn.conf`, delad tunnel, beständig via
+`/Library/LaunchDaemons/com.fredrikbranstrom.wireguard-mzvpn.plist`. **⚠ Delad nyckel med pappas
+laptop till 2026-08-26** — en aktiv anslutning per nyckel, så en av oss faller tyst bort om båda
+kopplar upp. Han reser fredag; dedikerad klient utlovad den 26:e.
+
+**Nattfönster tillagt i vakten (01:00–07:00).** Vakten cedar på Revit-NÄRVARO, inte aktivitet, så en
+Revit som lämnas öppen över natten blockerar backloggen i all oändlighet — mätt 2026-08-25: vakten
+cedade oavbrutet i 20 minuter med enbart ett öppet Revit-fönster. Mellan 01 och 07 ignoreras den
+närvaron. **`gpu-preempt.flag` åsidosätts aldrig** — den är den uttryckliga
+högre-prioritet-signalen och vinner när som helst på dygnet.
+
+Kvarstående risk, låg men verklig: en lång rendering eller export som lämnas igång över natten är
+inte ett vilande Revit. Pappa nämner sådant i regel.
+
+**Ceden är verifierad i skarpt läge**, inte bara i teorin: den fångade en levande Revit-session och
+vägrade starta servern. Originalvakten säkerhetskopierad som `embed_guard_local.ps1.bak-20260825`.
+
+**Bevakare på Macen:** `~/.local/bin/z4-embed-watch` (LaunchAgent, var tionde minut) pingar ntfy när
+servern faktiskt startar och när den stannar, med kvarvarande kö. Enbart läsande — den startar,
+stoppar eller åsidosätter aldrig vakten.
+
 ## Architecture
 - **Model** — `Qwen3-Embedding-4B-Q4_K_M.gguf`, **byte-identical to Darwin's** (sha256
   `2b0cf8…`). Same GGUF + same llama.cpp pooling ⇒ **same vector space**, so chunks already
