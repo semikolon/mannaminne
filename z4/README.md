@@ -41,10 +41,21 @@ Tunneln på Macen: `~/.config/wireguard-mac/mzvpn.conf`, delad tunnel, beständi
 laptop till 2026-08-26** — en aktiv anslutning per nyckel, så en av oss faller tyst bort om båda
 kopplar upp. Han reser fredag; dedikerad klient utlovad den 26:e.
 
-**Nattfönster tillagt i vakten (01:00–07:00).** Vakten cedar på Revit-NÄRVARO, inte aktivitet, så en
-Revit som lämnas öppen över natten blockerar backloggen i all oändlighet — mätt 2026-08-25: vakten
-cedade oavbrutet i 20 minuter med enbart ett öppet Revit-fönster. Mellan 01 och 07 ignoreras den
-närvaron. **`gpu-preempt.flag` åsidosätts aldrig** — den är den uttryckliga
+**Ceden gäller nu AKTIVITET, inte närvaro** (ersatte nattfönstret samma dag, som var en sämre
+lösning: det skyddade bara utanför 01–07 och såg inte en rendering klockan tre). `cad_working.ps1`
+mäter CAD-processernas egen CPU-tid över ett fönster på sex sekunder och cedar när summan överstiger
+0,15 CPU-sekunder per väggsekund. Verifierat i båda riktningarna: ett öppet men vilande Revit gav
+0,05 CPU-sekunder på åtta (alltså vila, servern startade), och mot en syntetiskt belastad process
+utlöste den korrekt. Fail-closed: fel i mätningen cedar.
+
+**Varför CPU-tid och inte GPU-belastning**, trots att aggregerad `utilization.gpu` bevisligen
+fungerar: vår egen server driver den till ~100 %, så främmande last blir omätbar så fort vi kört
+igång och skyddet mitt i körningen försvinner. Per-process CPU-tid överlever kontention och vaktar
+därför hela körningen, inte bara startbeslutet.
+
+**Historik (borttaget):** nattfönster 01–07.
+
+**`gpu-preempt.flag` åsidosätts aldrig** — den är den uttryckliga
 högre-prioritet-signalen och vinner när som helst på dygnet.
 
 Kvarstående risk, låg men verklig: en lång rendering eller export som lämnas igång över natten är
@@ -92,7 +103,21 @@ Production runs **always-on (CarveOut=1)** with a **CAD-presence cede** (`run_em
 - Reassurance: a GPU at 100% does not lock up the machine (CPU/RAM/UI stay fine); only GPU apps
   (CAD viewport, or an active Parsec stream) feel it — and CAD triggers the cede.
 
-**🚨 Why no idle gate — both auto-signals are broken on this A4000 (2026-06-12):**
+**⚡ RÄTTELSE 2026-08-25 — aggregerad GPU-belastning FUNGERAR, och det testades aldrig i juni.**
+Juni-utredningen prövade **per-process**-mätvärden (minne, `pmon`) och båda är verkligen `[N/A]` på
+den här drivrutinen. Slutsatsen blev "detektion är omöjlig" och letandet stannade där. Men den
+**aggregerade** räknaren `nvidia-smi --query-gpu=utilization.gpu` fungerar utmärkt: mätt 2026-08-25
+med Revit ÖPPET gav tio prov på tio sekunder **0 % rakt igenom**. Öppet och arbetande går alltså att
+skilja åt — det var aldrig omöjligt, bara omätt på rätt räknare.
+
+Varför det är bättre än nattfönstret: det skyddar Mats dygnet runt i stället för bara utanför 01–07,
+och det svarar på vad han faktiskt gör i stället för vad han råkat lämna öppet. En rendering klockan
+tre på natten syns; för nattfönstret är den osynlig.
+
+Haken, och den är verklig: vår egen embed-server driver belastningen till 100 %, så en naiv koll
+cedar mot sig själv. Regeln måste vara *"hög belastning som INTE är vår egen"*.
+
+**🚨 Why no idle gate — both PER-PROCESS auto-signals are broken on this A4000 (2026-06-12):**
 - **Per-process GPU memory reads `[N/A]`** (`nvidia-smi --query-compute-apps=...,used_memory` →
   `[N/A]`), so any memory-jump cede is BLIND. (Same flaw hits brf-auto's `gpu_guard_local.ps1` —
   flagged in the council doc.)

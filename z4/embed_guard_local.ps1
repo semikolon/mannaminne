@@ -35,7 +35,18 @@ $log = "E:\llama-embed\embed_guard.log"
 function Now(){ [DateTime]::Now.ToString('o') }
 function Log($m){ "$(Now) $m" | Add-Content $log }
 function IdleSec(){ try { [int](& $qs) } catch { 0 } }
-function NightWindow(){
+function CadWorking(){
+  # Is Mats ACTUALLY working, or is a CAD window merely open? Presence ceded for
+  # 20 minutes straight on 2026-08-25 with Revit idle, blocking the backlog.
+  # Per-process CPU time answers the real question and, unlike GPU utilisation,
+  # survives contention from our own server â€” so it guards the whole run, not
+  # just the decision to start. Fails CLOSED: any error cedes.
+  try {
+    $r = & powershell -NoProfile -ExecutionPolicy Bypass -File 'E:\llama-embed\cad_working.ps1'
+    return ($LASTEXITCODE -eq 0)
+  } catch { return $true }
+}
+function NightWindowUnused(){
   # Between 01:00-07:00 an OPEN Revit is not WORK: the guard cedes on presence,
   # so an idle Revit left overnight blocks the backlog forever (measured
   # 2026-08-25). The preempt-flag cede is never overridden by this.
@@ -88,7 +99,7 @@ try {
     $idle = IdleSec
     $cede = $null
     if(FlagFresh){ $cede = "preempt-flag" }              # a higher-priority Z4 job wants the GPU
-    elseif((CadPresent) -and -not (NightWindow)){ $cede = "cad-present" }         # Revit/AutoCAD running => Mats on local CAD
+    elseif((CadPresent) -and (CadWorking)){ $cede = "cad-working" }         # Revit/AutoCAD running => Mats on local CAD
     elseif($CarveOut -eq 0 -and $idle -lt $CedeIdleSec){ $cede = "idle=${idle}s" }
     if($cede){ StopServer $cede; Start-Sleep -Seconds $PollSec; continue }
     $okToRun = ($CarveOut -eq 1) -or ($idle -ge ($LaunchIdleMin*60))
@@ -99,4 +110,5 @@ try {
   StopServer "guard-exit"   # never orphan VRAM if the guard ends/dies gracefully
   Log "guard exit"
 }
+
 
