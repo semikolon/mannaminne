@@ -39,7 +39,15 @@ utredning: `~/dotfiles/docs/z4_atkomst_och_darwin_avbrott_2026-08-25.md`.
 Tunneln på Macen: `~/.config/wireguard-mac/mzvpn.conf`, delad tunnel, beständig via
 `/Library/LaunchDaemons/com.fredrikbranstrom.wireguard-mzvpn.plist`. **⚠ Delad nyckel med pappas
 laptop till 2026-08-26** — en aktiv anslutning per nyckel, så en av oss faller tyst bort om båda
-kopplar upp. Han reser fredag; dedikerad klient utlovad den 26:e.
+kopplar upp. Han reser fredag; dedikerad klient var **utlovad den 26:e och har inte kommit** (kollat
+2026-08-26 22:00, `mzvpn.conf` orörd sedan den 25:e). Tas upp på samtalet med honom.
+
+**⏸ Backfillen är pausad sedan 2026-08-26 — högtalarbrus hos pappa.** När A4000:an
+belastas hörs brus ur hans högtalare: uppmätt tyst vid 22 W, brus vid 129 W, över tre
+av- och påslag. Det är en jordslinga på högtalarsidan, inte något digitalt och inget vi
+orsakar utöver att vara den första ihållande GPU-lasten som blottar den. Full utredning
+med vad som uteslutits: `~/dotfiles/TODO.md`, sök "högtalarbrus". Återuppta med
+`kill -CONT <pid>` på Mac-klienten, men stäm av med honom först.
 
 **Ceden gäller nu AKTIVITET, inte närvaro** (ersatte nattfönstret samma dag, som var en sämre
 lösning: det skyddade bara utanför 01–07 och såg inte en rendering klockan tre). `cad_working.ps1`
