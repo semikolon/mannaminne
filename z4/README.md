@@ -34,7 +34,7 @@ below unchanged.
 **`ssh z4` fungerar igen.** Vägen in är **pappas egen router-VPN**, inte den utåtringande tunneln som
 den här körboken förutsatte. CGNAT-diagnosen som blockerat i två månader var fel — TCP 443 till hans
 adress svarar, alltså är linjen nåbar; det är port 2224 ensam som inte är vidarebefordrad. Full
-utredning: `~/dotfiles/docs/z4_atkomst_och_darwin_avbrott_2026-08-25.md`.
+utredning: `~/dotfiles/docs/z4_access_and_darwin_outage_2026-08-25.md`.
 
 Tunneln på Macen: `~/.config/wireguard-mac/mzvpn.conf`, delad tunnel, beständig via
 `/Library/LaunchDaemons/com.fredrikbranstrom.wireguard-mzvpn.plist`. **⚠ Delad nyckel med pappas
