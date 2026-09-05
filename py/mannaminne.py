@@ -94,12 +94,21 @@ _EMBED_URL_CACHE = None
 # --- DB ---------------------------------------------------------------------
 
 def load_conn():
+    """Connection from ~/.config/mannaminne/db.env, with the environment taking
+    precedence for each key. The override exists so a run can be pointed at a
+    scratch database (MANNAMINNE_PG_DB=mannaminne_probe …) without editing the
+    live config — which is how the per-file incremental ingest was verified
+    end-to-end before it was trusted with the real index (2026-09-05)."""
     env = {}
     p = Path(HOME) / ".config/mannaminne/db.env"
     for line in p.read_text().splitlines():
         if "=" in line and not line.startswith("#"):
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip()
+    for k in ("MANNAMINNE_PG_HOST", "MANNAMINNE_PG_PORT", "MANNAMINNE_PG_DB",
+              "MANNAMINNE_PG_USER", "MANNAMINNE_PG_PASSWORD"):
+        if os.environ.get(k):
+            env[k] = os.environ[k]
     import psycopg
     return psycopg.connect(
         host=env["MANNAMINNE_PG_HOST"], port=env["MANNAMINNE_PG_PORT"],
@@ -446,14 +455,8 @@ def discover_docs():
             if _is_dataless(f):
                 print(f"doc: skipping dataless iCloud placeholder {f}", file=sys.stderr)
                 continue
-            try:
-                if os.path.getsize(f) > 600_000:
-                    continue
-                content = open(f, encoding="utf-8", errors="replace").read()
-            except Exception:
-                continue
-            if not content.strip():
-                continue
+            # project/rel are computed BEFORE the file is read so the per-file skip
+            # can avoid the read, the chunking and the upsert, not just the last of them.
             if mode == "dotfiles":
                 project = "dotfiles"
             elif mode == "icloud":
@@ -467,6 +470,16 @@ def discover_docs():
             else:
                 project = Path(f).relative_to(base).parts[0]
             rel = os.path.relpath(f, base)
+            if _unchanged("doc", f, source_id=f"doc:{project}:{rel}"):
+                continue
+            try:
+                if os.path.getsize(f) > 600_000:
+                    continue
+                content = open(f, encoding="utf-8", errors="replace").read()
+            except Exception:
+                continue
+            if not content.strip():
+                continue
             cr, up = _doc_dates(f)
             yield from _rows("doc", f"doc:{project}:{rel}", project, Path(f).stem, content, cr,
                              chunker=chunk_markdown, updated=up)
@@ -562,6 +575,84 @@ def _skip_if_unchanged(kind, paths):
     _PENDING_FINGERPRINTS[kind] = fp
 
 
+#: Per-FILE incremental ingest (2026-09-05). ``_skip_if_unchanged`` above is
+#: per-KIND: one changed document re-chunked and re-upserted all 97k doc chunks,
+#: and the same for sessions, code, commits and screenshots — ~295 000 chunks
+#: every night for ~1 500 genuinely new ones, which is why the nightly run took
+#: five to six and a half hours and ran into the working day (measured
+#: 2026-09-05, ``docs/nightly_ingest_cost_2026-09-05.md``). These helpers make
+#: the skip per file. The SAFETY half is the carry-forward: cmd_ingest's orphan
+#: prune deletes chunks of a completed kind that were NOT emitted this run, so a
+#: skipped file's chunks must be marked seen or skipping would DELETE them. Every
+#: skip therefore registers its source_id (or, for git_commit, its repo) here,
+#: and the prune adds those chunks to _seen from the database. If that carry
+#: fails for any reason the kind is dropped from the prune entirely — the index
+#: is never at risk from a failure in the optimisation.
+_FILE_FP_DIR = os.path.join(os.path.dirname(_FINGERPRINT_FILE), "file-fingerprints")
+_PENDING_FILE_FPS: dict = {}
+_CARRIED_SOURCES: dict = {}
+_CARRIED_PROJECTS: dict = {}
+
+
+def _path_fp(path):
+    """``mtime_ns:size`` for a file, or None when it cannot be stat'd (missing,
+    unreadable). None never compares equal, so an unstattable file re-ingests."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return f"{st.st_mtime_ns}:{st.st_size}"
+
+
+def _load_file_fps(kind):
+    try:
+        with open(os.path.join(_FILE_FP_DIR, f"{kind}.json")) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_file_fps(kind):
+    """Persist the pending per-file map — called by cmd_ingest only after the kind
+    ingests to completion, so a mid-run failure re-ingests rather than falsely skips."""
+    fps = _PENDING_FILE_FPS.get(kind)
+    if not fps:
+        return
+    try:
+        os.makedirs(_FILE_FP_DIR, exist_ok=True)
+        path = os.path.join(_FILE_FP_DIR, f"{kind}.json")
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as fh:
+            json.dump(fps, fh)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _unchanged(kind, path, source_id=None, project=None, _fps_cache={}):
+    """True when ``path`` is byte-identical (same mtime + size) to the last run that
+    completed this kind — the caller then skips reading and re-chunking it.
+
+    Records the current fingerprint for EVERY path it is asked about, changed or
+    not: the saved map replaces the previous one, so a file that has disappeared
+    is simply absent and its chunks prune normally. On True it registers the
+    source_id (or project) as carried, which is what keeps the prune from
+    deleting the very chunks we chose not to re-emit."""
+    if kind not in _fps_cache:
+        _fps_cache[kind] = _load_file_fps(kind)
+    fp = _path_fp(path)
+    pending = _PENDING_FILE_FPS.setdefault(kind, {})
+    if fp is not None:
+        pending[str(path)] = fp
+    if fp is None or _fps_cache[kind].get(str(path)) != fp:
+        return False
+    if source_id:
+        _CARRIED_SOURCES.setdefault(kind, set()).add(source_id)
+    if project:
+        _CARRIED_PROJECTS.setdefault(kind, set()).add(project)
+    return True
+
+
 def _volume_available(path: str) -> bool:
     """For /Volumes/<vol>/... paths the volume must be mounted; all other paths
     are always 'available'."""
@@ -607,6 +698,8 @@ def discover_sessions():
             if sid in seen_sids:   # same session in live + archive → index once (live wins)
                 continue
             seen_sids.add(sid)
+            if _unchanged("session", f, source_id=f"session:{sid}"):
+                continue
             proj = Path(f).parent.name.rsplit("-", 1)[-1]
             parts, created = [], ""
             try:
@@ -1156,12 +1249,16 @@ def discover_screenshots():
         if limit and n >= limit:
             break
         n += 1
+        name = os.path.basename(f)
+        # Skipped before the OCR lookup: an unchanged screenshot needs neither the
+        # cache read nor the upsert. This is the single biggest kind (132k chunks).
+        if _unchanged("screenshot", f, source_id=f"ss:mac:{name}"):
+            continue
         txt = _ocr_text(f, cache)
         if n % 200 == 0:
             _flush()
         if not txt:
             continue
-        name = os.path.basename(f)
         created = time.strftime("%Y-%m-%d", time.gmtime(os.path.getmtime(f)))
         yield from _rows("screenshot", f"ss:mac:{name}", "mac-screenshot", name,
                          f"{name}\n{txt}", created)
@@ -1251,6 +1348,11 @@ def discover_git_commits():
     n = 0
     for repo in repos:
         name = repo.name
+        # Per-REPO skip: .git/logs/HEAD changes exactly when a ref moves, so an
+        # untouched repo needs no `git log` and no re-upsert of its commits. Carried
+        # by PROJECT because a repo's chunks are keyed gitcommit:<repo>:<sha>.
+        if _unchanged("git_commit", str(repo / ".git/logs/HEAD"), project=name):
+            continue
         try:
             out = subprocess.run(
                 ["git", "-C", str(repo), "log", "--no-merges", "-z",
@@ -1315,6 +1417,10 @@ def discover_code():
     n = 0
     for repo, rel in files:
         fp = repo / rel
+        name = repo.name
+        sid = f"code:{name}:{rel}"
+        if _unchanged("code", str(fp), source_id=sid):
+            continue
         try:
             if fp.stat().st_size > _CODE_MAX_FILE_BYTES:
                 continue
@@ -1322,12 +1428,10 @@ def discover_code():
             created = time.strftime("%Y-%m-%d", time.gmtime(fp.stat().st_mtime))
         except Exception:
             continue
-        name = repo.name
         try:
             chunks = code_chunker.chunk_code(src, rel, max_chars=max_chars)
         except Exception:
             continue
-        sid = f"code:{name}:{rel}"
         for ci, ch in enumerate(chunks):
             text = ch.text.replace("\x00", "")
             title = (f"{rel} › {ch.symbol}" if ch.symbol else rel)[:120].replace("\x00", "")
@@ -1369,6 +1473,10 @@ def cmd_ingest(args):
         completed_kinds.append(kind)
         if kind in _PENDING_FINGERPRINTS:          # persist only after full success
             _save_fingerprint(kind, _PENDING_FINGERPRINTS[kind])
+        _save_file_fps(kind)                       # same rule for the per-file map
+        skipped = len(_CARRIED_SOURCES.get(kind, ())) + len(_CARRIED_PROJECTS.get(kind, ()))
+        if skipped:
+            print(f"  {kind}: {skipped} unchanged source(s) skipped (per-file)", flush=True)
         total += n
         print(f"  {kind}: {n} chunks upserted", flush=True)
     # orphan cleanup: drop chunks of the COMPLETED kinds NOT produced this run
@@ -1381,6 +1489,29 @@ def cmd_ingest(args):
             for x in seen:
                 cp.write_row((x,))
         cur.execute("CREATE INDEX ON _seen (id)")
+        # Carry-forward (per-file incremental ingest): a file skipped as unchanged
+        # emitted no rows this run, so its chunks are absent from _seen and the
+        # prune below would DELETE them. Mark them seen straight from the table.
+        # A kind whose carry fails is dropped from the prune entirely — the failure
+        # mode of this optimisation must be "keeps too much", never "deletes".
+        carry_failed = set()
+        for k in list(completed_kinds):
+            sids = sorted(_CARRIED_SOURCES.get(k, ()))
+            projs = sorted(_CARRIED_PROJECTS.get(k, ()))
+            if not sids and not projs:
+                continue
+            try:
+                if sids:
+                    cur.execute("INSERT INTO _seen (id) SELECT id FROM chunks "
+                                "WHERE source_kind = %s AND source_id = ANY(%s)", (k, sids))
+                if projs:
+                    cur.execute("INSERT INTO _seen (id) SELECT id FROM chunks "
+                                "WHERE source_kind = %s AND project = ANY(%s)", (k, projs))
+            except Exception as e:
+                conn.rollback()
+                carry_failed.add(k)
+                print(f"  {k}: carry-forward failed ({type(e).__name__}) — "
+                      f"prune SKIPPED for this kind, chunks preserved", flush=True)
         pruned = 0
         # Non-code kinds: kind-scoped prune (each has its own SourceUnavailable/
         # SourceUnchanged guard; a skipped kind never reaches completed_kinds).
@@ -1388,7 +1519,8 @@ def cmd_ingest(args):
         # PART of itself this run (see the constant's docstring) would otherwise
         # have the un-emitted part deleted as orphaned.
         other = [k for k in completed_kinds
-                 if k not in ("code", "git_commit") and k not in _PARTIAL_KINDS]
+                 if k not in ("code", "git_commit") and k not in _PARTIAL_KINDS
+                 and k not in carry_failed]
         if other:
             cur.execute("DELETE FROM chunks WHERE source_kind = ANY(%s) "
                         "AND NOT EXISTS (SELECT 1 FROM _seen s WHERE s.id = chunks.id)", (other,))
@@ -1401,7 +1533,12 @@ def cmd_ingest(args):
         # prunes (project matches, id unseen). Subsumes the old env-allowlist
         # skip: an env-scoped subset run only sees its own projects, so it can
         # only prune its own repos.
-        code_kinds = [k for k in completed_kinds if k in ("code", "git_commit")]
+        code_kinds = [k for k in completed_kinds
+                      if k in ("code", "git_commit") and k not in carry_failed]
+        # Repos processed this run. A repo whose files were ALL skipped as unchanged
+        # contributes nothing to `seen`, so it is not in this list and is preserved
+        # whole; a repo with SOME files skipped is in the list, and those files'
+        # chunks are in _seen via the carry-forward above.
         processed_projects = sorted({
             x.split(":", 2)[1] for x in seen
             if (x.startswith("code:") or x.startswith("gitcommit:")) and x.count(":") >= 2
