@@ -173,8 +173,14 @@ cedar mot sig själv. Regeln måste vara *"hög belastning som INTE är vår ege
 - **CAD detection is process-presence only** — `Revit|acad` in `nvidia-smi` is the working local
   CAD signal. It deliberately ignores background `parsecd.exe`; active Parsec still needs
   operator/health-loop attention.
-- **Throughput ~40/sec** — overnight-clearable. Tunable higher (more `--parallel`, bigger
-  client batches) but not worth it for a one-time backlog.
+- **Throughput ~40/sec** — the June-2026 figure, and **it did not reproduce on 2026-09-05:
+  measured 9,4 chunks/s on this backlog, and raising the client from 2 workers/batch-4 to
+  4 workers/batch-16 moved it only to 9,9.** The card sat at 95-100 % and 124-132 W throughout,
+  so client-side round-trips were NOT the constraint — the hypothesis that they were is refuted
+  by that null result. What has not been established is whether the card is genuinely saturated
+  or merely busy: `utilization.gpu` counts "a kernel is running", not useful work, so a badly
+  shaped workload can pin it at 100 % while achieving little. Unexplained 4× gap; do not plan a
+  run on the 40/s number. **At 10/s a million-chunk backlog is ~28 hours, not an evening.**
 - **Permanently-failing rows** — a chunk that always errors stays NULL → the client backoff-
   loops on it at the tail. Mark/skip if the backlog stalls near-done.
 
