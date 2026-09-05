@@ -72,6 +72,18 @@ For a Z4 batch run, override these upward after the Z4 server/tunnel is live.
 `ingest` discovers source content, chunks it, and upserts rows. If text changes,
 the chunk's embedding is reset to `NULL` so `embed` can refill it.
 
+**Unchanged files are skipped per FILE, not per kind** (2026-09-05). A fingerprint of
+`mtime_ns:size` gates the five discoverers that walk files — docs, sessions, code, git
+commits, screenshots — and a skipped file's `source_id` is carried into the `_seen`
+anti-join so the prune does not delete chunks whose file was never read. Fingerprints
+are saved only when a kind completes, so an interrupted run re-reads rather than
+silently skipping, and a failed carry-forward drops that kind from the prune entirely
+rather than risking deletion. Before this, `_skip_if_unchanged` worked per KIND, so one
+edited file re-chunked the whole kind: ~295 000 chunks re-upserted nightly for ~1 500
+new ones, and a run that occupied 05:00–11:00 every day
+(`docs/nightly_ingest_cost_2026-09-05.md`). The LaunchAgent also runs at background
+priority now, so a long run yields to whoever is at the keyboard.
+
 Docs use heading-aware markdown chunks. The global
 `~/.claude/CLAUDE.md` file is indexed as a special doc source because it contains
 high-value operating context outside the usual docs roots.

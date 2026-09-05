@@ -57,6 +57,24 @@ The ingest itself uses little CPU (2 m 57 s of CPU over 4 h — it is database-b
 
 Darwin is not the bottleneck: load 4.5, 12 GB available, containers up 3 days.
 
+## What shipped, same day
+
+Items 1 and 2 below are **done** (commits `7bf6afff` in dotfiles, `a8b21bc` here) — read the
+list as history, not as a plan:
+
+- **Background priority** — the LaunchAgent template now sets `ProcessType Background`,
+  `LowPriorityIO` and `Nice 10`, so a long run yields CPU and disk to whoever is at the keyboard.
+  This shortens nothing; it removes the felt lag.
+- **Per-file skip** — a `mtime_ns:size` fingerprint gates the five file-walking discoverers, with
+  the skipped source carried into the `_seen` anti-join so the prune leaves its chunks alone.
+  Fingerprints save only on kind completion; a failed carry-forward drops that kind from the prune
+  rather than risking deletion. Verified on a scratch database: one file edited → one unchanged
+  source skipped, one chunk upserted, **pruned 0**.
+
+**Not yet measured in production.** The next scheduled run is the first real test; compare its
+duration and its per-kind chunk counts against the table above. Items 3–5 stay open and are
+probably unnecessary if the skip performs as designed.
+
 ## What to change, cheapest first
 
 1. **Yield to the user (minutes, no code).** The LaunchAgent `com.fredrikbranstrom.mannaminne-ingest.plist` sets only `StartCalendarInterval`. Adding `ProcessType: Background`, `LowPriorityIO: true` and `Nice: 10` makes macOS deprioritise its CPU and I/O against the foreground. This does not shorten the run; it should remove the felt lag.
