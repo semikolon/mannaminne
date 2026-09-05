@@ -204,13 +204,21 @@ June.
 
 **What is actually missing is routing, on both ends, and no software anywhere:**
 
-1. **On Darwin**, the peer's `AllowedIPs = 10.0.0.6/32` admits only the router itself. To reach
+1. ~~**On Darwin**, widen the peer's `AllowedIPs`.~~ **Done 2026-09-05** — and it turned out to be
+   a re-application, not a discovery: commit `47b12d47` had already put
+   `AllowedIPs = 10.0.0.6/32, 192.168.0.0/24` in the router role template, and the live machine had
+   drifted away from it. **The overlay was ahead of the machine, which is the opposite of the usual
+   assumption.** Verified after the change: the allowed-ips and the route are in place on Darwin,
+   and nothing on `192.168.0.0/24` answers on four ports, which localises what remains to step 2.
+   Original wording: the peer's `AllowedIPs = 10.0.0.6/32` admitted only the router itself. To reach
    machines behind it, it needs `10.0.0.6/32, 192.168.0.0/24`; wg-quick then installs the route.
    One line in `/etc/wireguard/wg0.conf`, reversible, and it belongs in the nit-tracked Darwin
    overlay like the rest.
-2. **On dad's router**, it must forward from the tunnel into its LAN and route the replies back.
-   Whether an ASUS WireGuard *client* does that without a further setting is **not yet measured** —
-   it is the one genuine unknown, and step 1 is the cheap way to find out.
+2. **On dad's router: the WireGuard-client "Inbound Firewall" toggle must be set to Allow.**
+   Corrected the same day — this was written as an unknown, and it was not: the setting is named in
+   `dotfiles/system/roles/router/etc/wireguard/wg0.conf.template`, in a comment added with the Z4
+   peer on 2026-06-29. Reading the overlay before designing would have skipped the detour.
+   Only Mats can set it, and it is a toggle rather than an install.
 
 The silent `ping 10.0.0.6` is not alarming on its own: routers commonly ignore ICMP on a tunnel
 interface. Prefer a protocol that answers when testing, per the method note in the swhisper doc — an
