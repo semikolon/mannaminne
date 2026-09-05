@@ -43,7 +43,9 @@ kopplar upp. Han reser fredag; dedikerad klient var **utlovad den 26:e och har i
 2026-08-26 22:00, `mzvpn.conf` orörd sedan den 25:e). Tas upp på samtalet med honom.
 
 **⏸ Backfillen är pausad sedan 2026-08-26 — högtalarbrus hos pappa.** När A4000:an
-belastas hörs brus ur hans högtalare: uppmätt tyst vid 22 W, brus vid 129 W, över tre
+belastas hörs brus ur hans högtalare **i hans kontor** — alltså där han arbetar, inte i ett
+sällskapsrum, vilket är varför gränsen är hans arbetsro och inte bara trivsel. Uppmätt tyst
+vid 22 W, brus vid 129 W (en körning ligger på 124-132 W, alltså mitt i registret), över tre
 av- och påslag. Det är en jordslinga på högtalarsidan, inte något digitalt och inget vi
 orsakar utöver att vara den första ihållande GPU-lasten som blottar den. Full utredning
 med vad som uteslutits: `~/dotfiles/TODO.md`, sök "högtalarbrus". **Stäm av med honom först.**
@@ -59,6 +61,20 @@ alltså bara om pappa *arbetar*, inte om han är *hemma*. Mätt 2026-09-05 14:10
 men vilande, 0,045 CPU-sekunder per väggsekund mot tröskeln 0,15 — vakten hade startat servern.
 Det är precis det läge den akustiska pausen finns för: grönt ljus från vakten är inte samtycke
 från honom.
+
+### Att stoppa en körning — `z4-embed-stop`
+
+`~/.local/bin/z4-embed-stop` (nit-spårat) gör hela stoppsekvensen: dödar Mac-klienten, kör
+`schtasks /end` **och** `kill_embed.ps1` på Z4:an, verifierar att ingen `llama-server` ligger
+kvar och pingar `fleet`-topicen. Båda Windows-stegen behövs — `/end` hoppar över vaktens
+städning och lämnar annars servern föräldralös med VRAM taget.
+
+**En körning med deadline får två oberoende lager**, eftersom ett missat stopp hörs hemma hos
+honom: (1) en engångs-LaunchAgent med `StartCalendarInterval` som kör stoppskriptet på slaget
+och sedan avinstallerar sig själv — den överlever en omstart av Macen, vilket en sovande
+skalprocess inte gör; (2) `MANNAMINNE_EMBED_MAX_SECONDS` på klienten, som stannar sig själv
+oavsett vad som händer med agenten. Klienten skriver var 500:e chunk, så ett stopp när som
+helst kostar högst den påbörjade halvminuten och nästa körning fortsätter där den slutade.
 
 **Ceden gäller nu AKTIVITET, inte närvaro** (ersatte nattfönstret samma dag, som var en sämre
 lösning: det skyddade bara utanför 01–07 och såg inte en rendering klockan tre). `cad_working.ps1`
