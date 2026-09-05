@@ -53,7 +53,8 @@ med vad som uteslutits: `~/dotfiles/TODO.md`, sök "högtalarbrus". **Stäm av m
 **⚠ `kill -CONT <pid>` gäller inte längre (2026-09-05).** Macen startades om 13:16 den dagen
 för macOS 26.6.2, så den avstannade klienten finns inte kvar — det går ingen process att
 återuppta. Att återuppta betyder numera att starta klienten på nytt enligt "Run / check / stop"
-nedan. Kön var 1 008 246 av 2 240 118 chunks vid omstarten, alltså **cirka sju timmar vid
+nedan. Rå NULL-räkning var 1 008 246 av 2 240 118 vid omstarten, men **det verkliga jobbet är
+ungefär hälften** (se not nedan), alltså **cirka sju timmar vid
 uppmätta 40 chunks/s**: en nattkörning, inte något som hinner bli klart under ett arbetspass.
 
 **Vakten hör inte högtalarna.** `cad_working.ps1` mäter CAD-processernas CPU-tid och säger
@@ -197,8 +198,9 @@ cedar mot sig själv. Regeln måste vara *"hög belastning som INTE är vår ege
   oberoende av klientens parallellism (2 arbetare/batch 4 → 4/32 ändrar ingenting, mätt både
   i juni och i september), så kortet är compute-bundet på prefill. Juni-dokumentets otestade
   serverrekommendation (ubatch 8192, ctx 16384) deployades samma dag och **gjorde det sämre**:
-  7,0-7,8/s, VRAM 9,4 → 13,0 GiB, återställd. **Vid 10/s är en miljonchunkskö ~28 timmar, inte
-  en kväll** — planera fönstren därefter. Enda kvarstående hypotes är Q4-dekvantiseringen;
+  7,0-7,8/s, VRAM 9,4 → 13,0 GiB, återställd. **Vid 10/s är det verkliga
+  återstående jobbet ~12,7 timmar** (455 908 chunks per 2026-09-05), inte de ~26 som en rå
+  NULL-räkning antyder. **Räkna kön med produktionsfrågans eget predikat, inte med `embedding IS NULL`.** Rå NULL-räkning ger 937 246; jobbet plockar faktiskt 455 908, eftersom 481 338 chunks (51 %) tillhör e-postklasserna `reading` och `telemetry` som `EMBED_SKIP_CLASSES` aldrig väljer. De förblir NULL med flit och är inte arbete. — planera fönstren därefter. Enda kvarstående hypotes är Q4-dekvantiseringen;
   otestad, och ett byte till F16 bryter vektorrymden mot de 1,23 miljoner redan inbäddade.
   Full mätning: `~/dotfiles/docs/z4_gpu_idle_parsec_throughput_research_2026_06_12.md` § AVGJORT.
 - **Permanently-failing rows** — a chunk that always errors stays NULL → the client backoff-
