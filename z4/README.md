@@ -46,8 +46,19 @@ kopplar upp. Han reser fredag; dedikerad klient var **utlovad den 26:e och har i
 belastas hörs brus ur hans högtalare: uppmätt tyst vid 22 W, brus vid 129 W, över tre
 av- och påslag. Det är en jordslinga på högtalarsidan, inte något digitalt och inget vi
 orsakar utöver att vara den första ihållande GPU-lasten som blottar den. Full utredning
-med vad som uteslutits: `~/dotfiles/TODO.md`, sök "högtalarbrus". Återuppta med
-`kill -CONT <pid>` på Mac-klienten, men stäm av med honom först.
+med vad som uteslutits: `~/dotfiles/TODO.md`, sök "högtalarbrus". **Stäm av med honom först.**
+
+**⚠ `kill -CONT <pid>` gäller inte längre (2026-09-05).** Macen startades om 13:16 den dagen
+för macOS 26.6.2, så den avstannade klienten finns inte kvar — det går ingen process att
+återuppta. Att återuppta betyder numera att starta klienten på nytt enligt "Run / check / stop"
+nedan. Kön var 1 008 246 av 2 240 118 chunks vid omstarten, alltså **cirka sju timmar vid
+uppmätta 40 chunks/s**: en nattkörning, inte något som hinner bli klart under ett arbetspass.
+
+**Vakten hör inte högtalarna.** `cad_working.ps1` mäter CAD-processernas CPU-tid och säger
+alltså bara om pappa *arbetar*, inte om han är *hemma*. Mätt 2026-09-05 14:10 var Revit öppet
+men vilande, 0,045 CPU-sekunder per väggsekund mot tröskeln 0,15 — vakten hade startat servern.
+Det är precis det läge den akustiska pausen finns för: grönt ljus från vakten är inte samtycke
+från honom.
 
 **Ceden gäller nu AKTIVITET, inte närvaro** (ersatte nattfönstret samma dag, som var en sämre
 lösning: det skyddade bara utanför 01–07 och såg inte en rendering klockan tre). `cad_working.ps1`
