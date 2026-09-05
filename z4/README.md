@@ -178,47 +178,44 @@ password (`discover_fyr`). Do not push without sanitizing + a visibility audit.
 - mannaminne design: `~/dotfiles/docs/personal_archives_semantic_search_2026_06_10.md`
 - Reused guards: `~/Projects/brf-auto/lib/z4_trial/guard/`
 
-## Getting Darwin to reach the Z4 directly — designed 2026-09-05, not built
+## Getting Darwin to reach the Z4 directly — corrected 2026-09-05, nothing to install
 
-Today the Mac is the only bridge, which makes every backfill hostage to the Mac being
-awake. That is backwards: **the database lives on Darwin**, so Darwin is the natural
-client — no network round-trip per batch, always on, unaffected by a macOS update.
+**An earlier draft of this section, written the same day, said to install WireGuard on the Z4 and
+dial Darwin. That was wrong and it was written before reading
+`~/Projects/swhisper-work/docs/z4_transcription_offload_2026_06_27.md`, which had already settled
+the topology.** Keeping the correction visible because the wrong version is the intuitive one and
+someone will re-derive it.
 
-Measured 2026-09-05, and this is the part that makes it easy:
+**The tunnel already exists and is live.** Measured 2026-09-05 on Darwin:
 
-| path | state |
+| fact | measurement |
 |---|---|
-| Darwin → `z4` | **closed** — Darwin cannot even resolve the name |
-| Z4 → `darwin.home:5440` / `192.168.4.1:5440` | **closed** |
-| Z4 → the Mac's tunnel address `10.6.0.2:22` | **open** |
-| Darwin listening on `0.0.0.0:51820` | **yes — Darwin already runs a WireGuard server** |
-| Darwin's WAN address | public (`94.254.88.116` at the time of measurement) |
+| Darwin `wg0` | `10.0.0.1/24`, port 51820, NAT masquerade so peers reach the Sarpetorp LAN |
+| peer `10.0.0.6`, commented "Z4 (Mats RTX A4000) — added 2026-06-29" | **handshake 20 s ago**, endpoint `89.233.228.17`, 798 KiB in / 219 KiB out |
+| WireGuard on the Z4 itself | **absent** — no `wg.exe`, no service, no `C:\Program Files\WireGuard` |
+| `ping 10.0.0.6` from Darwin | silent |
+| Darwin → `192.168.0.233` (the Z4) and `192.168.0.1` (dad's router) | silent |
+| Darwin's routes on `wg0` | `10.0.0.0/24` only |
 
-**So the Z4 should dial Darwin, not the reverse.** An outbound WireGuard client from
-dad's LAN to Darwin's public endpoint needs *nothing* from dad's Asus router — no port
-forward, no peer entry, no involvement. Contrast the obvious-looking alternative of
-giving Darwin a peer on dad's router, which needs dad's hands and his consent for a
-standing route into his home network.
+Those two rows together settle what holds `10.0.0.6`: **dad's own router, not the Z4** — which is
+what the 2026-08-25 correction in the swhisper-work doc concluded from the other direction. So dad
+never needs WireGuard on the Z4; his router is already a peer of Darwin's mesh and has been since
+June.
 
-Steps, in order:
+**What is actually missing is routing, on both ends, and no software anywhere:**
 
-1. On the Z4, install WireGuard for Windows and generate a keypair.
-2. On Darwin, add the peer (its public key, an address in the existing VPN subnet) and
-   reload. This is a change to the production router's config, so it is nit-tracked like
-   the rest of Darwin's overlay.
-3. Client config on the Z4: Darwin's public endpoint, `AllowedIPs` limited to Darwin's
-   LAN, `PersistentKeepalive = 25` since the Z4 sits behind NAT.
-4. Then choose where the embed client runs. Either end works once the tunnel is up; on
-   the Z4 the GPU is local and the database is remote, on Darwin the reverse. Prefer
-   **Darwin**, because a per-batch database round-trip over a home tunnel is the slower
-   half and Darwin is the machine that never sleeps.
+1. **On Darwin**, the peer's `AllowedIPs = 10.0.0.6/32` admits only the router itself. To reach
+   machines behind it, it needs `10.0.0.6/32, 192.168.0.0/24`; wg-quick then installs the route.
+   One line in `/etc/wireguard/wg0.conf`, reversible, and it belongs in the nit-tracked Darwin
+   overlay like the rest.
+2. **On dad's router**, it must forward from the tunnel into its LAN and route the replies back.
+   Whether an ASUS WireGuard *client* does that without a further setting is **not yet measured** —
+   it is the one genuine unknown, and step 1 is the cheap way to find out.
 
-**The blocker is not technical, it is courtesy.** Step 1 installs a virtual network
-adapter on a machine dad works on daily, over a remote session — do it when he is not
-using it, and tell him first. Verified 2026-09-05: WireGuard is absent from the Z4
-(`wg.exe` missing, no service, no `C:\Program Files\WireGuard`), and the SSH session
-does have Administrator rights, so nothing else stands in the way.
+The silent `ping 10.0.0.6` is not alarming on its own: routers commonly ignore ICMP on a tunnel
+interface. Prefer a protocol that answers when testing, per the method note in the swhisper doc — an
+early `nc -zvu` there reported success against a dead path, because UDP reports success on silence.
 
-Until this is built, a backfill runs from the Mac and dies when the Mac restarts. That
-costs little: the client commits progress per batch and resumes, so a reboot loses at
-most the batch in flight.
+Until routing is in place a backfill runs from the Mac, which is the only machine on both tunnels
+(`10.0.0.4` on Darwin's mesh, `10.6.0.2` on dad's). That costs little day to day: the client commits
+progress per batch and resumes, so a Mac restart loses at most the batch in flight.
