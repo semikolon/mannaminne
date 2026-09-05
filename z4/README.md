@@ -189,14 +189,18 @@ cedar mot sig själv. Regeln måste vara *"hög belastning som INTE är vår ege
 - **CAD detection is process-presence only** — `Revit|acad` in `nvidia-smi` is the working local
   CAD signal. It deliberately ignores background `parsecd.exe`; active Parsec still needs
   operator/health-loop attention.
-- **Throughput ~40/sec** — the June-2026 figure, and **it did not reproduce on 2026-09-05:
-  measured 9,4 chunks/s on this backlog, and raising the client from 2 workers/batch-4 to
-  4 workers/batch-16 moved it only to 9,9.** The card sat at 95-100 % and 124-132 W throughout,
-  so client-side round-trips were NOT the constraint — the hypothesis that they were is refuted
-  by that null result. What has not been established is whether the card is genuinely saturated
-  or merely busy: `utilization.gpu` counts "a kernel is running", not useful work, so a badly
-  shaped workload can pin it at 100 % while achieving little. Unexplained 4× gap; do not plan a
-  run on the 40/s number. **At 10/s a million-chunk backlog is ~28 hours, not an evening.**
+- **Throughput ~10 chunks/s på olik text — AVGJORT 2026-09-05, och 40/sec var aldrig sant.**
+  Både den siffran och forskningsdokumentets 112/sek kom från riktmärken med *upprepad
+  identisk* text, alltså llama.cpp:s prefix-cache och inte inbäddning: 16 identiska strängar
+  ger 46,5/s, 16 OLIKA riktiga chunks ger 9,0/s. **Ett riktmärke för en inbäddningstjänst
+  måste mata olik text.** Takten är platt över batchstorlek (16/32/64 → 9,0/10,0/9,6) och
+  oberoende av klientens parallellism (2 arbetare/batch 4 → 4/32 ändrar ingenting, mätt både
+  i juni och i september), så kortet är compute-bundet på prefill. Juni-dokumentets otestade
+  serverrekommendation (ubatch 8192, ctx 16384) deployades samma dag och **gjorde det sämre**:
+  7,0-7,8/s, VRAM 9,4 → 13,0 GiB, återställd. **Vid 10/s är en miljonchunkskö ~28 timmar, inte
+  en kväll** — planera fönstren därefter. Enda kvarstående hypotes är Q4-dekvantiseringen;
+  otestad, och ett byte till F16 bryter vektorrymden mot de 1,23 miljoner redan inbäddade.
+  Full mätning: `~/dotfiles/docs/z4_gpu_idle_parsec_throughput_research_2026_06_12.md` § AVGJORT.
 - **Permanently-failing rows** — a chunk that always errors stays NULL → the client backoff-
   loops on it at the tail. Mark/skip if the backlog stalls near-done.
 
