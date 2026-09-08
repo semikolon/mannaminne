@@ -67,6 +67,22 @@ MANNAMINNE_EMBED_PROBE_TIMEOUT=5
 
 For a Z4 batch run, override these upward after the Z4 server/tunnel is live.
 
+## The email index is NOT a view of your Gmail account
+
+It is the union of the live account and the mbox archives in `MBOX_SOURCES`, and
+on this corpus the archive is much the larger half: the single biggest sender has
+**140 572 messages in the FERMI archive and 95 in Gmail**. Anyone reasoning about
+"the email corpus" as though it were the inbox will be wrong by that margin, and
+`project` cannot tell them apart — the ingest hardcodes `"gmail"` for both.
+
+Two things follow. **Deleting mail from Gmail does not remove it here**: email is
+marked `PARTIAL` on every ingest and excluded from the orphan prune by name, so
+chunks outlive their messages. And **corpus volume is the wrong ranking for any
+storage decision**, since a sender can be enormous here and absent there.
+
+Full measurement + the inbox-cleanup arc:
+`~/dotfiles/docs/gmail_storage_and_index_pruning_2026-09-06.md`.
+
 ## Indexing
 
 `ingest` discovers source content, chunks it, and upserts rows. If text changes,
