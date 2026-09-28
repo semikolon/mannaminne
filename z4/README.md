@@ -21,13 +21,15 @@ Darwin is draining at roughly the measured 0.55/s and will not finish this decad
 unreachable — the Windows firewall step below has not been run. Keyword search covers the whole
 corpus meanwhile; only semantic search lags.
 
-**Reach status 2026-08-13 (verified):** the Z4 IS a live WireGuard peer — `10.0.0.6`, handshake
+**⚠ SUPERSEDED — the next paragraph is wrong and kept only as history (rättat 2026-08-25 och 2026-09-05):** `10.0.0.6` is dad's router, not the Z4, and repointing `ssh z4` to it would break reach. Current reach: § ÅTKOMST LÖST below; the Darwin route: § Getting Darwin to reach the Z4 directly.
+
+~~**Reach status 2026-08-13 (verified):** the Z4 IS a live WireGuard peer — `10.0.0.6`, handshake
 seconds old, traffic flowing. Two blockers sit above it before `ssh z4` works again: the Z4's Windows
 Firewall does not admit the tunnel subnet, and Darwin's `FORWARD` chain drops NEW peer-to-peer
 traffic. Both diagnosed with exact fixes in
 `~/Projects/swhisper-work/docs/z4_transcription_offload_2026_06_27.md` § Access-path STATUS
 2026-08-13. Clear those, repoint the `z4` ssh host to `10.0.0.6`, then follow "Run / check / stop"
-below unchanged.
+below unchanged.~~
 
 ## ⚡ ÅTKOMST LÖST + nattfönster (2026-08-25)
 
@@ -54,8 +56,8 @@ med vad som uteslutits: `~/dotfiles/TODO.md`, sök "högtalarbrus". **Stäm av m
 för macOS 26.6.2, så den avstannade klienten finns inte kvar — det går ingen process att
 återuppta. Att återuppta betyder numera att starta klienten på nytt enligt "Run / check / stop"
 nedan. Rå NULL-räkning var 1 008 246 av 2 240 118 vid omstarten, men **det verkliga jobbet är
-ungefär hälften** (se not nedan), alltså **cirka sju timmar vid
-uppmätta 40 chunks/s**: en nattkörning, inte något som hinner bli klart under ett arbetspass.
+ungefär hälften** (se not nedan), alltså **cirka 12,7 timmar vid
+uppmätta ~10 chunks/s** (40/s var aldrig sant, se § throughput nedan): mer än en natt, och inget som hinner bli klart under ett arbetspass.
 
 **Vakten hör inte högtalarna.** `cad_working.ps1` mäter CAD-processernas CPU-tid och säger
 alltså bara om pappa *arbetar*, inte om han är *hemma*. Mätt 2026-09-05 14:10 var Revit öppet
@@ -73,7 +75,7 @@ städning och lämnar annars servern föräldralös med VRAM taget.
 **En körning med deadline får två oberoende lager**, eftersom ett missat stopp hörs hemma hos
 honom: (1) en engångs-LaunchAgent med `StartCalendarInterval` som kör stoppskriptet på slaget
 och sedan avinstallerar sig själv — den överlever en omstart av Macen, vilket en sovande
-skalprocess inte gör; (2) `MANNAMINNE_EMBED_MAX_SECONDS` på klienten, som stannar sig själv
+skalprocess inte gör. **Ordningen i agentens kommando avgör om den verkligen försvinner: `rm -f` av plisten FÖRE `launchctl bootout`.** Bootout av det egna jobbet dödar skalet som kör kommandot, så ett `rm` efteråt körs aldrig; agenten från 2026-09-05 låg därför kvar på disk till 28 september och hade vid nästa inloggning stoppat varje körning kl 18 varje dag; (2) `MANNAMINNE_EMBED_MAX_SECONDS` på klienten, som stannar sig själv
 oavsett vad som händer med agenten. Klienten skriver var 500:e chunk, så ett stopp när som
 helst kostar högst den påbörjade halvminuten och nästa körning fortsätter där den slutade.
 
@@ -113,8 +115,8 @@ stoppar eller åsidosätter aldrig vakten.
   would force a full re-embed + drop Darwin as a fallback. Throughput gain of FP16 is
   non-load-bearing for a one-time backlog.
 - **Server** — llama.cpp `llama-server.exe` (b9610 win-cuda-12.4) at `E:\llama-embed\`,
-  OpenAI-compat `/v1/embeddings` on `0.0.0.0:8081`, `--parallel 8 --ctx-size 8192
-  --batch-size 2048` (A4000 tensor cores; Darwin's single-stream/batch-2 config throttled it
+  OpenAI-compat `/v1/embeddings` on `0.0.0.0:8081`, `--parallel 4 --ctx-size 8192
+  --batch-size 4096 --ubatch-size 4096` as deployed in `embed_guard_local.ps1` (A4000 tensor cores; Darwin's single-stream/batch-2 config throttled it
   to ~3/sec — see "throughput" below).
 - **Reach** — the Z4's :8081 is NOT WAN-exposed (only ssh is); the Mac client reaches it via
   an SSH tunnel `ssh -L 8081:127.0.0.1:8081 z4`, kept alive by the launchd agent

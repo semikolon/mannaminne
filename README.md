@@ -108,7 +108,7 @@ high-value operating context outside the usual docs roots.
 batch does not poison the whole pending set. Use `embed --limit N` for bounded
 smoke tests or staged backfills.
 
-**Scheduled (Mac Mini):** two launchd jobs run nightly — a **02:00 embed-only
+**Scheduled (Mac Mini):** two launchd jobs run nightly — **except that the embed drainer is `launchctl disable`d since 2026-09-05** so it does not grind the same queue as the Z4 backfill; re-enable (`launchctl enable` + `bootstrap`) once the Z4 has drained the queue, or new chunks stop being embedded. The jobs: a **02:00 embed-only
 backlog drainer** (`mannaminne-scheduled-embed`, ~3h budget, quiet-hour so it
 never contends with daytime embedder use) and the **05:00 full ingest+embed**
 (`mannaminne-ingest-runner` → `mannaminne-scheduled-ingest`, ~1h embed budget,

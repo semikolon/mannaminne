@@ -77,7 +77,7 @@ function StartServer(){
   if(ServerProc){ return }
   Log "START llama-server :$Port"
   if($DryRun){ Log "DRYRUN would-start"; return }
-  # A4000 throughput config (vs Darwin's GTX-1650 batch-of-2/single-stream): 8 parallel
+  # A4000 throughput config (vs Darwin's GTX-1650 batch-of-2/single-stream): 4 parallel
   # slots + room for batched requests. Throughput-only â€” same GGUF/pooling => same-space.
   Start-Process -FilePath $Server -WindowStyle Hidden -ArgumentList @(
     "--model",$Model,"--embedding","--host","0.0.0.0","--port","$Port",
