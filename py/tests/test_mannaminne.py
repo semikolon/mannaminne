@@ -838,3 +838,68 @@ class PrefixRecallAgainstTheRealIndexTests(unittest.TestCase):
                 self.skipTest("index busy (a nightly ingest holds it)")
             self.assertGreaterEqual(prefix, exact,
                                     f"{term}:* returned fewer than {term} — prefix must be a superset")
+
+
+class EmailSubjectRuleTests(unittest.TestCase):
+    """A `subject:` line overrides the sender domain's class: machine mail sent
+    from a domain whose human mail is kept."""
+
+    # Lines in the format of ~/.config/mannaminne/email_classes.txt.
+    CONFIG = (
+        "# kommentar\n"
+        "telemetry papertrailapp.com\n"
+        "keep example.org\n"
+        "telemetry subject:A User Error Has Occurred\n"
+    )
+
+    def _rules(self, text):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "email_classes.txt"
+            p.write_text(text, encoding="utf-8")
+            with mock.patch.object(m, "EMAIL_CLASS_CONFIG", str(p)):
+                return m._load_email_rules()
+
+    def test_subject_lines_are_not_read_as_domains(self):
+        domains, subjects = self._rules(self.CONFIG)
+        self.assertEqual(domains, {"papertrailapp.com": "telemetry", "example.org": "keep"})
+        self.assertEqual(subjects, [("a user error has occurred", "telemetry")])
+
+    def test_missing_config_classifies_nothing(self):
+        with mock.patch.object(m, "EMAIL_CLASS_CONFIG", "/nonexistent/email_classes.txt"):
+            self.assertEqual(m._load_email_rules(), ({}, []))
+
+    def test_live_subject_rules_outrank_the_domain_class(self):
+        """Against the real index: every subject rule in the real config matches
+        mail, and none of that mail is left on its domain's class."""
+        _domains, subjects = m._load_email_rules()
+        if not subjects:
+            self.skipTest("no subject rules configured")
+        try:
+            conn = m.load_conn()
+            cur = conn.cursor()
+            cur.execute("SET statement_timeout='60s'")
+            domains, _ = m._load_email_rules()
+            own = [d for d, c in domains.items()]
+            for needle, cls in subjects:
+                cur.execute(f"""SELECT count(*), count(*) FILTER (WHERE e.class = %(cls)s)
+                                FROM chunks c JOIN email_class e ON e.mid = c.source_id
+                                WHERE c.source_kind='email' AND c.chunk_idx=0
+                                  AND {m.SUBJECT_RULE_SQL}""", {"cls": cls, "needle": needle})
+                total, classed = cur.fetchone()
+                self.assertGreater(total, 0, f"subject rule {needle!r} matches no mail")
+                self.assertEqual(classed, total, f"{total - classed} mail(s) matching {needle!r} are not {cls}")
+                # A reply to machine mail is a person writing: it stays on its domain's class.
+                cur.execute("""SELECT count(*) FROM chunks c JOIN email_class e ON e.mid = c.source_id
+                               WHERE c.source_kind='email' AND c.chunk_idx=0
+                                 AND lower(c.title) LIKE %(reply)s AND e.class = %(cls)s
+                                 AND NOT (e.domain = ANY(%(same)s))""",
+                            {"reply": "re: %" + needle + "%", "cls": cls,
+                             "same": [d for d in own if domains[d] == cls]})
+                self.assertEqual(cur.fetchone()[0], 0, f"replies to {needle!r} were classed {cls}")
+        except m_psycopg_errors() as e:
+            self.skipTest(f"index unreachable or busy: {e}")
+
+
+def m_psycopg_errors():
+    import psycopg
+    return (psycopg.OperationalError, psycopg.errors.QueryCanceled, FileNotFoundError)

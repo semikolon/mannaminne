@@ -1794,9 +1794,15 @@ def _vec(v):
 EMAIL_CLASS_CONFIG = os.path.expanduser("~/.config/mannaminne/email_classes.txt")
 EMBED_SKIP_CLASSES = {"telemetry", "reading"}
 
-def _load_email_classes() -> dict:
-    """domain → class, from the user-editable config. Absent file = classify nothing."""
-    out = {}
+def _load_email_rules():
+    """(domain → class, [(subject substring, class)]) from the user-editable
+    config. Absent file = classify nothing.
+
+    A `subject:` line outranks the sender's domain. It exists for machine mail
+    sent from a domain whose human mail is kept: measured 2026-10-04, two
+    families of automated error mail were 108 603 of apoex.se's messages and a
+    sixth of all email text, inside a domain the config explicitly keeps."""
+    domains, subjects = {}, []
     try:
         with open(EMAIL_CLASS_CONFIG, encoding="utf-8") as fh:
             for line in fh:
@@ -1804,11 +1810,26 @@ def _load_email_classes() -> dict:
                 if not line or line.startswith("#"):
                     continue
                 parts = line.split(None, 1)
-                if len(parts) == 2:
-                    out[parts[1].strip().lower()] = parts[0].strip().lower()
+                if len(parts) != 2:
+                    continue
+                cls, rest = parts[0].strip().lower(), parts[1].strip()
+                if rest.lower().startswith("subject:"):
+                    needle = rest[len("subject:"):].strip().lower()
+                    if needle:
+                        subjects.append((needle, cls))
+                else:
+                    domains[rest.lower()] = cls
     except FileNotFoundError:
         pass
-    return out
+    return domains, subjects
+
+#: Which mail a `subject:` rule takes. A reply or a forward of machine mail is a
+#: person writing, so the rule steps around it: measured 2026-10-04, 551 such
+#: messages were colleagues discussing the alerts, inside a domain that is kept
+#: precisely for its human mail.
+SUBJECT_RULE_SQL = """strpos(lower(c.title), %(needle)s) > 0
+        AND left(lower(c.title), strpos(lower(c.title), %(needle)s) - 1)
+            !~ '(^|[^a-z])(re|sv|fw|fwd|vb|vs) *:'"""
 
 def _ensure_email_class(conn, cur, verbose=True):
     """Populate the message-level class table. Cheap, idempotent, resumable."""
@@ -1816,35 +1837,55 @@ def _ensure_email_class(conn, cur, verbose=True):
                      mid text PRIMARY KEY, domain text, class text)""")
     cur.execute("CREATE INDEX IF NOT EXISTS email_class_class ON email_class (class)")
     conn.commit()
-    classes = _load_email_classes()
-    if not classes:
+    classes, subjects = _load_email_rules()
+    if not classes and not subjects:
         return
     cur.execute("""SELECT count(*) FROM chunks c WHERE c.source_kind='email' AND c.chunk_idx=0
                    AND NOT EXISTS (SELECT 1 FROM email_class e
                                    WHERE e.mid = split_part(c.id,'#',1))""")
     todo = cur.fetchone()[0]
-    if not todo:
-        return
-    if verbose:
-        print(f"  classifying {todo} message(s) by sender domain", flush=True)
-    # One pass over the header chunks: extract the From: domain, map it, store it.
-    cur.execute(r"""
-        INSERT INTO email_class (mid, domain, class)
-        SELECT split_part(c.id,'#',1),
-               lower(substring(c.text from 'From:[^@
+    if todo:
+        if verbose:
+            print(f"  classifying {todo} message(s) by sender domain", flush=True)
+        # One pass over the header chunks: extract the From: domain, map it, store it.
+        cur.execute(r"""
+            INSERT INTO email_class (mid, domain, class)
+            SELECT split_part(c.id,'#',1),
+                   lower(substring(c.text from 'From:[^@
 ]*@([A-Za-z0-9._-]+)')),
-               'unknown'
-        FROM chunks c
-        WHERE c.source_kind='email' AND c.chunk_idx=0
-        ON CONFLICT (mid) DO NOTHING""")
-    conn.commit()
-    # Apply the config. A domain SUFFIX match, so mail.substack.com counts too.
+                   'unknown'
+            FROM chunks c
+            WHERE c.source_kind='email' AND c.chunk_idx=0
+            ON CONFLICT (mid) DO NOTHING""")
+        conn.commit()
+    # Apply the config on every run, not only when new mail arrived: an edited
+    # rule must reach the mail already classified. Subject rules are resolved
+    # first and the domain pass steps around their messages, so a `keep` domain
+    # and a `telemetry` subject inside it do not rewrite each other every run.
+    cur.execute("CREATE TEMP TABLE IF NOT EXISTS _subject_class (mid text PRIMARY KEY, class text)")
+    cur.execute("TRUNCATE _subject_class")
+    for needle, cls in subjects:
+        cur.execute(f"""INSERT INTO _subject_class (mid, class)
+                        SELECT c.source_id, %(cls)s FROM chunks c
+                        WHERE c.source_kind='email' AND c.chunk_idx=0
+                          AND {SUBJECT_RULE_SQL}
+                        ON CONFLICT (mid) DO NOTHING""", {"cls": cls, "needle": needle})
+    changed = 0
+    # A domain SUFFIX match, so mail.substack.com counts too.
     for dom, cls in classes.items():
         cur.execute("""UPDATE email_class SET class=%s
-                       WHERE class <> %s AND (domain = %s OR domain LIKE %s)""",
+                       WHERE class <> %s AND (domain = %s OR domain LIKE %s)
+                         AND NOT EXISTS (SELECT 1 FROM _subject_class s
+                                         WHERE s.mid = email_class.mid)""",
                     [cls, cls, dom, "%." + dom])
+        changed += cur.rowcount
+    cur.execute("""UPDATE email_class e SET class = s.class
+                   FROM _subject_class s WHERE s.mid = e.mid AND e.class <> s.class""")
+    changed += cur.rowcount
     conn.commit()
-    if verbose:
+    if verbose and (todo or changed):
+        if changed:
+            print(f"  email classes: {changed} message(s) reclassified by the config", flush=True)
         cur.execute("SELECT class, count(*) FROM email_class GROUP BY 1 ORDER BY 2 DESC")
         for cls, n in cur.fetchall():
             mark = "  (skipped for embedding)" if cls in EMBED_SKIP_CLASSES else ""
