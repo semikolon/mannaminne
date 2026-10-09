@@ -190,6 +190,7 @@ Design and operational notes:
 
 `mannaminne embed --project deliberus --kind doc` embeds only that project's note chunks and stops when
 they are done. Both flags take several names. The nightly ingest runs this for every project named in
-`~/.config/mannaminne/embed_first.txt` (at most 30 minutes), whether or not the bulk queue is paused, so
+`~/.config/mannaminne/embed_first.txt` (at most 30 minutes), and then for every project's notes, code, commits
+and sessions (at most 30 more), whether or not the bulk queue is paused, so
 that search by meaning does not go blind on the notes and code in daily use while an email backlog waits.
 It did from 2026-09-05 to 2026-10-09: the pause meant for the backlog stopped everything.
