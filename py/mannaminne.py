@@ -1891,14 +1891,33 @@ def _ensure_email_class(conn, cur, verbose=True):
             mark = "  (skipped for embedding)" if cls in EMBED_SKIP_CLASSES else ""
             print(f"    {cls}: {n} messages{mark}", flush=True)
 
+def _embed_scope(projects, kinds):
+    """SQL fragment and parameters that narrow the embed queue to chosen projects and source kinds.
+
+    None means no narrowing. A filter, never an ordering, so a scoped run finishes when ITS chunks are
+    done however long the rest of the queue is. An empty list is refused, since reading it as
+    "everything" would start the whole backlog by accident."""
+    sql, params = "", []
+    for column, values, flag in (("c.project", projects, "--project"), ("c.source_kind", kinds, "--kind")):
+        if values is None:
+            continue
+        if not values:
+            raise SystemExit(f"embed: {flag} needs at least one name")
+        sql += f" AND {column} = ANY(%s)"
+        params.append(list(values))
+    return sql, params
+
 def cmd_embed(args):
     conn = load_conn()
     cur = conn.cursor()
     _ensure_email_class(conn, cur)
-    cur.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL")
+    scope_sql, scope_params = _embed_scope(getattr(args, "project", None) if args else None,
+                                           getattr(args, "kind", None) if args else None)
+    cur.execute("SELECT count(*) FROM chunks c WHERE c.embedding IS NULL" + scope_sql, scope_params)
     pending = cur.fetchone()[0]
     max_total = getattr(args, "limit", 0) if args else 0
-    print(f"embedding: {pending} chunks pending", flush=True)
+    print(f"embedding: {pending} chunks pending" + (f" in scope {scope_params}" if scope_params else ""), flush=True)
+    idle_rounds = 0
     done = 0
     start = time.monotonic()
     while True:
@@ -1910,11 +1929,11 @@ def cmd_embed(args):
             select_limit = min(select_limit, remaining)
         # Skip, don't sort. Ordering still queues the junk; filtering never does.
         cur.execute("""SELECT c.id,c.text FROM chunks c
-                       WHERE c.embedding IS NULL
+                       WHERE c.embedding IS NULL""" + scope_sql + """
                          AND NOT EXISTS (SELECT 1 FROM email_class e
                                          WHERE e.mid = split_part(c.id,'#',1)
                                            AND e.class = ANY(%s))
-                       LIMIT %s""", (list(EMBED_SKIP_CLASSES), select_limit))
+                       LIMIT %s""", (*scope_params, list(EMBED_SKIP_CLASSES), select_limit))
         rows = cur.fetchall()
         conn.commit()  # close the read transaction before slow network embedding work
         if not rows:
@@ -1938,6 +1957,8 @@ def cmd_embed(args):
                 [(_vec(emb), cid) for cid, emb in results])
         conn.commit()
         done += wrote
+        if wrote:
+            idle_rounds = 0
         print(f"  embedded ~{done}/{pending} (+{wrote})", flush=True)
         if max_total and done >= max_total:
             break
@@ -1950,6 +1971,12 @@ def cmd_embed(args):
             # error, etc.) instead of blind-guessing "endpoint down" — the last
             # drop reason is set whenever a chunk is permanently dropped.
             reason = _LAST_DROP_REASON or "endpoint unreachable/ceded"
+            idle_rounds += 1
+            if scope_params and idle_rounds >= 10:
+                # A scoped run is a bounded job: it leaves, with its reason, when its chunks will not
+                # embed. The unscoped run keeps waiting, since it may be ceding to a busy GPU.
+                print(f"  no progress in {idle_rounds} rounds ({reason}) — stopping the scoped run", flush=True)
+                break
             print(f"  no progress ({reason}) — backing off 30s", flush=True)
             time.sleep(30)
     # build HNSW once vectors exist (idempotent)
@@ -2437,6 +2464,10 @@ def main():
         sp = argparse.ArgumentParser()
         sp.add_argument("--limit", type=int, default=0,
                         help="maximum pending chunks to embed in this run")
+        sp.add_argument("--project", nargs="*", default=None,
+                        help="embed only these projects' chunks, e.g. --project deliberus")
+        sp.add_argument("--kind", nargs="*", default=None,
+                        help="embed only these source kinds: doc, code, git_commit, session, ...")
         cmd_embed(sp.parse_args(rest))
     elif cmd == "stats":
         cmd_stats(None)
