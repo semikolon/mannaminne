@@ -194,3 +194,10 @@ they are done. Both flags take several names. The nightly ingest runs this for e
 and sessions (at most 30 more), whether or not the bulk queue is paused, so
 that search by meaning does not go blind on the notes and code in daily use while an email backlog waits.
 It did from 2026-09-05 to 2026-10-09: the pause meant for the backlog stopped everything.
+
+## A search says when it is partial
+
+A search by meaning can only find chunks that have an embedding. When part of what a search covered has none, it
+prints one line on stderr with the count for each kind, for exactly the scope searched (`-d -P deliberus` counts
+that project's notes). The count is made live beside the search, on its own connection, so nothing is cached and
+the output on stdout is unchanged. `-k` searches by words alone and prints no such line.

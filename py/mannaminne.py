@@ -2239,12 +2239,69 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
         conn.close()
     return ranked
 
+def _coverage_sql(scope, projects):
+    where, params = [], []
+    if scope:
+        where.append("source_kind = ANY(%s)")
+        params.append(list(scope))
+    if projects:
+        where.append("project = ANY(%s)")
+        params.append(list(projects))
+    sql = ("SELECT source_kind, count(*) FILTER (WHERE embedding IS NULL), count(*) FROM chunks"
+           + (" WHERE " + " AND ".join(where) if where else "") + " GROUP BY 1")
+    return sql, params
+
+def _embedding_coverage(scope, projects):
+    """Per source kind: (kind, chunks with no embedding, chunks), for exactly what a search covers.
+    Its own connection, so it can run beside the search. Counted live: nothing is cached."""
+    sql, params = _coverage_sql(scope, projects)
+    conn = load_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = '3s'")
+        cur.execute(sql, params)
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+def _coverage_notice(rows=None, error=None, late=False):
+    """The line a search prints on stderr when part of what it covered cannot be found by meaning.
+
+    None when every chunk in scope has an embedding. Why it exists: from 2026-09-05 to 2026-10-09 the
+    newest notes had no embeddings, every search over them fell back to shared words, and nothing said so."""
+    if late or error:
+        why = "the count did not come back in time" if late else f"the count failed: {error}"
+        return (f"mannaminne: could not check how much of this scope is embedded ({why}). "
+                f"Results may rest on shared words only.")
+    parts = [f"{kind} {pending:,} of {total:,} ({round(100 * pending / total)}%)"
+             for kind, pending, total in sorted(rows or [], key=lambda r: -r[1]) if pending and total]
+    if not parts:
+        return None
+    return ("mannaminne: search by meaning is PARTIAL here. Chunks with no embedding yet: " + " · ".join(parts)
+            + ". Those can be found by shared words only, and the newest notes are the likeliest to be among them.")
+
 def cmd_search(args):
     q = " ".join(args.query)
     scope = _scope(args)
     projects = _project_scope(args)
+    cover, counter = {}, None
+    if not args.keyword:
+        import threading
+
+        def _count():
+            try:
+                cover["rows"] = _embedding_coverage(scope, projects)
+            except Exception as e:  # the notice must never break a search, and never stay quiet either
+                cover["error"] = str(e)[:120]
+        counter = threading.Thread(target=_count, daemon=True)
+        counter.start()
     ranked = search_results(q, scope=scope, projects=projects,
                             keyword=args.keyword, limit=args.limit)
+    if counter:
+        counter.join(timeout=2.5)
+        note = _coverage_notice(cover.get("rows"), cover.get("error"), late=counter.is_alive())
+        if note:
+            print(note, file=sys.stderr)
     if not getattr(args, "pretty", False):
         # DEFAULT: JSONL — one JSON object per hit. date / source / score are
         # FIELDS, not a droppable prose header line, so a consuming agent that
