@@ -58,5 +58,46 @@ class SweepRuleTests(unittest.TestCase):
         self.assertFalse(im.is_bulk_label("Reklamation", ["Reklam"]))
 
 
+class ProtectListTests(unittest.TestCase):
+    """The money-and-authority list is personal and lives outside the repo."""
+
+    def setUp(self):
+        import tempfile
+        import inbox_inventory
+        self.inv = inbox_inventory
+        self.dir = tempfile.mkdtemp()
+
+    def write(self, text):
+        path = str(Path(self.dir) / "labels.txt")
+        Path(path).write_text(text, encoding="utf-8")
+        return path
+
+    def test_labels_are_read_one_per_line_without_comments(self):
+        path = self.write("# authorities\nSkatteverket\n\n  lowell  \n# banks\nswedbank\n")
+        self.assertEqual(self.inv.money_authority_labels(path), {"skatteverket", "lowell", "swedbank"})
+
+    def test_a_missing_list_is_refused_not_read_as_nothing_to_protect(self):
+        with self.assertRaises(SystemExit):
+            self.inv.money_authority_labels(str(Path(self.dir) / "absent.txt"))
+
+    def test_an_empty_list_is_refused_too(self):
+        with self.assertRaises(SystemExit):
+            self.inv.money_authority_labels(self.write("# nothing but a comment\n"))
+
+    def test_a_label_matches_whole_domain_parts_only(self):
+        self.assertEqual(self.inv.money_hits("mail.lowell.se", {"lowell", "eon"}), ["lowell"])
+        self.assertEqual(self.inv.money_hits("moveon.org", {"lowell", "eon"}), [])
+
+    def test_importing_the_modules_needs_no_personal_file(self):
+        # A fresh clone has none. The authority query is built when a table is built.
+        self.assertNotIn("authority", im.QUERIES)
+        self.assertTrue(callable(im.queries))
+
+    def test_the_source_names_no_sender_of_its_own(self):
+        # The list this file replaced was derived from one person's mail. It must not come back.
+        src = Path(self.inv.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("MONEY_AUTHORITY_LABELS = {", src)
+
+
 if __name__ == "__main__":
     unittest.main()

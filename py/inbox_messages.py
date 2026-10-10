@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from inbox_inventory import MONEY_AUTHORITY_LABELS  # noqa: E402
+from inbox_inventory import money_authority_labels  # noqa: E402
 
 CACHE = Path.home() / ".cache" / "mannaminne" / "inbox"
 CACHE_MAX_AGE_H = 20
@@ -63,8 +63,15 @@ QUERIES = {
                     "orderbekräftelse OR beställning OR bokning OR "
                     "bokningsbekräftelse OR booking OR biljett OR ticket OR "
                     "betalning OR payment OR avi OR påminnelse OR kontoutdrag)"),
-    "authority": "from:(" + " OR ".join(sorted(MONEY_AUTHORITY_LABELS)) + ")",
 }
+
+
+def queries():
+    """QUERIES plus the one built from the personal protect list, which is read
+    from a local file when a table is built and not when this module is imported,
+    so the tests and a fresh clone need no such file."""
+    return {**QUERIES,
+            "authority": "from:(" + " OR ".join(sorted(money_authority_labels())) + ")"}
 
 
 #: Personal mail providers. A message from one of these was written by a person
@@ -196,7 +203,7 @@ def build(fresh=False):
     jobs = {"all": {}}
     for lab in LABELS:
         jobs[lab] = {"label": lab}
-    for k, q in QUERIES.items():
+    for k, q in queries().items():
         jobs[k] = {"q": q}
     for b in SIZE_BOUNDS:
         jobs[f"size{b}"] = {"q": f"larger:{b}"}

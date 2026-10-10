@@ -77,23 +77,54 @@ def own_addresses() -> set[str]:
     except FileNotFoundError:
         return set()
 
-#: Money and authority. Losing one of these has real consequence given the
-#: skuldsanering history, so they are PROTECTED, never proposed for deletion.
-#: Substring match against the domain. Verified against the live domain list at
-#: the bottom of this file's run — if a term matches nothing, it is reported, so
-#: a list that quietly matches zero domains cannot hide.
-MONEY_AUTHORITY_TERMS = [
-    "kronofogden", "skatteverket", "forsakringskassan", "fk.se",
-    "arbetsformedlingen", "katrineholm", "kommun", "bank", "swedbank",
-    "nordea", "seb.", "handelsbanken", "lunar", "klarna", "inkasso",
-    "lowell", "intrum", "sergel", "svea", "payex", "fortnox", "visma",
-    "collectia", "alektum", "kronan", "csn.se", "pensionsmyndigheten",
-    "forsakring", "if.se", "folksam", "lansforsakringar", "trygghansa",
-    "minpension", "bankid", "swish", "avanza", "nordnet", "bahnhof",
-    "telia", "tele2", "vattenfall", "fortum", "e-on.", "eon.se", "hyresgast",
-    "advokat", "juridik", "domstol", "polisen", "migrationsverket",
-    "1177", "regionsormland", "vardguiden",
-]
+#: Money and authority. Losing one of these has real consequence, so they are
+#: PROTECTED and never proposed for deletion.
+#:
+#: Which authorities, collectors and banks write to a person is that person's
+#: own business, and this is a PUBLIC repository, so the list is read from a
+#: local file: one domain label per line. It should be DERIVED FROM THE ACTUAL
+#: DOMAIN LIST, not imagined. The first version here was written from memory and
+#: 19 of its terms matched zero domains: a trigger list is a fixture, and one
+#: written from imagination catches imagined cases. `main()` reports every label
+#: that matches no domain.
+#:
+#: Matching is by DOMAIN LABEL, never raw substring. A short term matched as a
+#: substring also hits every unrelated domain that happens to contain those
+#: letters ("eon" inside "moveon"). Label matching removes that whole class
+#: structurally instead of curating around each case.
+#:
+#: The critical entries are TINY by volume, a handful of messages each, which is
+#: exactly why a volume ranking would never surface them and a protect list has
+#: to exist.
+PROTECT_LABELS_FILE = os.path.expanduser("~/.config/mannaminne/inbox_protect_labels.txt")
+_protect_labels_cache: dict = {}
+
+
+def money_authority_labels(path=None) -> frozenset:
+    """The protect list. A missing or empty file is refused, never read as
+    "nothing to protect": a protect list that silently holds nothing looks, in
+    every table this produces, exactly like one that works."""
+    path = path or PROTECT_LABELS_FILE
+    if path not in _protect_labels_cache:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                labels = frozenset(l.strip().lower() for l in fh
+                                   if l.strip() and not l.lstrip().startswith("#"))
+        except FileNotFoundError:
+            labels = frozenset()
+        if not labels:
+            raise SystemExit(
+                f"no protect list at {path}: refusing to rank mail without it.\n"
+                "Write one domain label per line (the authorities, collectors and "
+                "banks whose mail must never be proposed for deletion).")
+        _protect_labels_cache[path] = labels
+    return _protect_labels_cache[path]
+
+
+def money_hits(domain, labels=None):
+    """Label-aware match. `eon.se` hits an `eon` term; `moveon.org` does not."""
+    own = set(domain.lower().split("."))
+    return sorted(own & (money_authority_labels() if labels is None else set(labels)))
 
 
 def norm_date(s):
@@ -205,10 +236,6 @@ def phase1(conn):
     return dom
 
 
-def money_hits(domain):
-    return [t for t in MONEY_AUTHORITY_TERMS if t in domain]
-
-
 def protect_reasons(rec):
     """Positive guard. Anything here is never proposed for deletion.
 
@@ -232,39 +259,63 @@ def protect_reasons(rec):
     return r
 
 
-def gmail(params_json):
-    """One gws call. Returns parsed JSON, or None on any failure."""
-    try:
-        out = subprocess.run(
-            ["gws", "gmail", "users", "messages", "list", "--params", params_json],
-            capture_output=True, text=True, timeout=60)
-        body = "\n".join(l for l in out.stdout.splitlines()
-                         if not l.startswith("Using keyring"))
-        return json.loads(body)
-    except Exception:
-        return None
+def gmail_count(q, cap=2000):
+    """Real paginated count. `resultSizeEstimate` is NOT usable: it returned
+    exactly 201 for `from:<domain>`, `to:<domain>` AND the bare name, while the
+    true paginated count was 95. An estimate that returns the same number for
+    three different questions is a cap, not an answer.
+
+    Stops at `cap` and says so, since the ranking only needs to know "big".
+    """
+    tok, n = None, 0
+    while n < cap:
+        params = {"userId": "me", "q": q, "maxResults": 500}
+        if tok:
+            params["pageToken"] = tok
+        try:
+            out = subprocess.run(
+                ["gws", "gmail", "users", "messages", "list", "--params",
+                 json.dumps(params)], capture_output=True, text=True, timeout=90)
+            d = json.loads("\n".join(l for l in out.stdout.splitlines()
+                                     if not l.startswith("Using keyring")))
+        except Exception:
+            return None
+        n += len(d.get("messages", []))
+        tok = d.get("nextPageToken")
+        if not tok:
+            return n
+    return cap  # "minst så här många"
 
 
 def phase2(dom, top_n):
-    """Gmail-side signals for the heaviest domains only.
+    """Gmail-side counts for the domains that could matter to the QUOTA.
 
-    Search operators mean a domain costs ~5 calls instead of one per message.
-    `resultSizeEstimate` is Gmail's own count for the query.
+    Selection is deliberately not "biggest in the corpus": the corpus carries a
+    4.7 GB offline mbox archive whose largest sender has 140 572 messages there
+    and 95 in Gmail. Ranking the deletion decision by corpus volume would put a
+    domain that frees nothing at the top of the page. So: the biggest by corpus
+    (they still need an INDEX verdict) plus everything still active recently
+    (they are what actually occupies the account).
     """
-    ranked = sorted(dom.values(), key=lambda r: -r["messages"])[:top_n]
-    print(f"  Gmail-signaler för topp {len(ranked)} domäner...", flush=True)
-    for i, rec in enumerate(ranked, 1):
+    by_size = sorted(dom.values(), key=lambda r: -r["messages"])[:top_n]
+    recent = [r for r in dom.values()
+              if (r.get("last_seen") or "") >= "2024-01-01" and r["messages"] >= 30]
+    picked, seen = [], set()
+    for r in by_size + sorted(recent, key=lambda r: -r["messages"]):
+        if r["domain"] not in seen:
+            seen.add(r["domain"])
+            picked.append(r)
+
+    print(f"  Gmail-antal för {len(picked)} domäner (sidräknat, inte uppskattat)...",
+          flush=True)
+    for i, rec in enumerate(picked, 1):
         d = rec["domain"]
-        print(f"    [{i}/{len(ranked)}] {d}", flush=True)
-        for key, q in (
-            ("gmail_total",  f"from:{d}"),
-            ("unread",       f"from:{d} is:unread"),
-            ("starred",      f"from:{d} is:starred"),
-            ("big",          f"from:{d} larger:1M"),
-            ("promotions",   f"from:{d} category:promotions"),
-        ):
-            r = gmail(json.dumps({"userId": "me", "q": q, "maxResults": 1}))
-            rec[key] = r.get("resultSizeEstimate", 0) if r else None
+        rec["in_gmail"] = gmail_count(f"from:{d}", cap=40000)
+        rec["gmail_big"] = gmail_count(f"from:{d} larger:1M", cap=5000)
+        rec["unread"] = gmail_count(f"from:{d} is:unread", cap=40000)
+        rec["starred"] = gmail_count(f"from:{d} is:starred", cap=2000)
+        print(f"    [{i}/{len(picked)}] {d:<34} Gmail={rec['in_gmail']} "
+              f"(korpus {rec['messages']:,})", flush=True)
     return dom
 
 
@@ -298,23 +349,19 @@ ORDER = ["död sedan länge", "aldrig öppnad", "reklam enligt Gmail",
 
 
 def verdicts(rec):
-    """Which verdicts make sense for this domain? Protection narrows, never hides.
+    """Which verdicts make sense here? Protection narrows; it never hides a row.
 
-    The first version of this sheet put protected domains in their own section at
-    the top and left them out of the clusters. That hid the single largest
-    sender — nearly half the entire inbox — behind the very guard meant to make
-    the sheet trustworthy. Protection is a property of a row, never a reason to
-    omit it: the biggest decision is exactly the one most likely to be protected.
+    An early version put protected domains in their own section and left them out
+    of the clusters, which hid the single largest sender behind the very guard
+    meant to make the sheet trustworthy. The biggest decision is exactly the one
+    most likely to be protected.
     """
     p = protect_reasons(rec)
-    if not p:
-        return ["radera", "arkivera+radera", "sluta indexera", "behåll"]
-    # Skyddad: ingen ren radering föreslås, men arkivera-och-töm förlorar ingenting
-    # och frigör precis lika mycket utrymme.
-    return ["arkivera+radera", "sluta indexera", "behåll"]
+    base = ["arkivera+radera", "sluta indexera", "behåll"]
+    return base if p else ["radera"] + base
 
 
-def row(rec):
+def sig(rec):
     bits = []
     if rec["written_to"]:
         bits.append(f"du skrev dit ×{rec['written_to']:,}")
@@ -322,84 +369,122 @@ def row(rec):
         bits.append("pengar/myndighet")
     if rec["elsewhere"]:
         bits.append("nämns personligen")
-    u = rec.get("unread")
-    if u is not None and rec.get("gmail_total"):
-        bits.append(f"{100*u/max(1,rec['gmail_total']):.0f} % olästa")
+    # Andelen olästa räknas BARA när båda talen är riktiga. Med taken 2 000 och
+    # 500 gav sju olika domäner exakt "25 % olästa" — kvoten mellan två tak, som
+    # såg ut som en mätning och var en artefakt av mina egna gränser.
+    g, u = rec.get("in_gmail"), rec.get("unread")
+    if g and u is not None and g < 40000 and u < 40000:
+        bits.append(f"{100*min(u,g)/g:.0f} % olästa")
+    elif u is not None:
+        bits.append(f"{u:,}+ olästa")
+    if rec.get("gmail_big"):
+        bits.append(f"{rec['gmail_big']} st >1 MB")
     return "; ".join(bits) or "inga relationssignaler"
 
 
+def gm(rec):
+    v = rec.get("in_gmail")
+    if v is None:
+        return "?"
+    return f"{v:,}+" if v >= 2000 else f"{v:,}"
+
+
 def write_sheet(dom, path, quota_used_gb=13.5, quota_limit_gb=16.1):
-    ranked = sorted(dom.values(), key=lambda r: -r["messages"])
-    total_msgs = sum(r["messages"] for r in dom.values())
-    total_pend = sum(r["chunks_pending"] for r in dom.values())
+    vals = list(dom.values())
+    total_msgs = sum(r["messages"] for r in vals)
+    total_pend = sum(r["chunks_pending"] for r in vals)
+    known = [r for r in vals if r.get("in_gmail") is not None]
 
     L = []; A = L.append
     A("# Inkorgsgenomgång — beslutsunderlag")
     A("")
-    A(f"Framtaget {date.today().isoformat()}. Lagring **{quota_used_gb} av "
-      f"{quota_limit_gb} GB**. {total_msgs:,} meddelanden, {len(dom):,} domäner, "
-      f"{total_pend:,} chunks kvar att bädda in.")
+    A(f"Framtaget {date.today().isoformat()}. Gmail: **{quota_used_gb} av "
+      f"{quota_limit_gb} GB**. Korpusen: {total_msgs:,} meddelanden, "
+      f"{len(dom):,} domäner, {total_pend:,} chunks kvar att bädda in.")
     A("")
-    A("**Läs inte allt.** De tio första domänerna nedan är tre fjärdedelar av all "
-      "post. Du kan sluta när du frigjort tillräckligt.")
+    A("## Läs det här först, annars blir listan missvisande")
     A("")
-    A("Skriv ditt ord på **Beslut:**-raden. Vokabulären:")
+    A("**Korpusen och Gmail är inte samma sak.** mannaminne har ätit ett 4,7 GB "
+      "mbox-arkiv från FERMI vid sidan av det levande kontot. Den största "
+      "avsändaren i korpusen har **140 572 meddelanden i arkivet och 95 i Gmail** "
+      "— att radera den ur Gmail skulle frigöra ingenting alls.")
     A("")
-    A("| ord | betyder |")
-    A("|---|---|")
-    A("| `radera` | bort ur Gmail. Korpusen behåller innehållet — e-post prunas aldrig. |")
-    A("| `arkivera+radera` | ladda ner till FERMI först, sedan bort ur Gmail. Förlorar ingenting. |")
-    A("| `sluta indexera` | stannar kvar i Gmail, men slutar kosta GPU-tid. |")
-    A("| `behåll` | orörd. |")
+    A("Därför står besluten i två separata listor, och de rangordnas olika:")
+    A("")
+    A("| lista | rangordnas efter | svarar på |")
+    A("|---|---|---|")
+    A("| **Radering** | antal i Gmail | vad som frigör lagring |")
+    A("| **Indexering** | chunks kvar att bädda | vad som kostar GPU-tid |")
+    A("")
+    A("Vokabulär: `radera` · `arkivera+radera` (ladda ner till FERMI först, "
+      "förlorar ingenting) · `sluta indexera` · `behåll`.")
     A("")
     A("Ingenting här raderar något. Ett andra verktyg läser dina beslut och verkställer.")
     A("")
 
     A("---")
     A("")
-    A("## De tyngsta domänerna — en rad, ett beslut")
+    A("## Radering — det som faktiskt ligger i Gmail")
     A("")
-    run = 0
-    A("| # | domän | meddelanden | löpande % | senast | signaler | tillåtna beslut |")
-    A("|---:|---|---:|---:|---|---|---|")
-    for i, r in enumerate(ranked[:25], 1):
-        run += r["messages"]
-        A(f"| {i} | `{r['domain']}` | {r['messages']:,} | {100*run/total_msgs:.0f} % "
-          f"| {r.get('last_seen') or '–'} | {row(r)} | {' · '.join(verdicts(r))} |")
+    if not known:
+        A("*Kör med `--gmail` för att fylla den här listan.*")
+        A("")
+    else:
+        ranked = sorted(known, key=lambda r: -(r.get("in_gmail") or 0))
+        A("| # | domän | i Gmail | i korpus | senast | signaler | tillåtna beslut |")
+        A("|---:|---|---:|---:|---|---|---|")
+        for i, r in enumerate(ranked[:30], 1):
+            A(f"| {i} | `{r['domain']}` | {gm(r)} | {r['messages']:,} "
+              f"| {r.get('last_seen') or '–'} | {sig(r)} | {' · '.join(verdicts(r))} |")
+        A("")
+        for i, r in enumerate(ranked[:12], 1):
+            A(f"**{i}. `{r['domain']}`** — {gm(r)} i Gmail, {r['messages']:,} i korpus. "
+              f"{sig(r)}.")
+            A("")
+            A("  **Beslut:** ")
+            A("")
+
+    A("---")
     A("")
-    for i, r in enumerate(ranked[:10], 1):
-        A(f"**{i}. `{r['domain']}`** — {r['messages']:,} meddelanden, "
-          f"{r['chunks_pending']:,} chunks kvar att bädda "
-          f"(~{r['chunks_pending']/10/60:.0f} GPU-minuter), "
-          f"{r.get('first_seen') or '?'} till {r.get('last_seen') or '?'}. "
-          f"{row(r)}.")
-        A("")
-        A("  **Beslut:** ")
-        A("")
+    A("## Indexering — det som kostar GPU-tid")
+    A("")
+    A("Oberoende av raderingen ovan: även post som inte finns kvar i Gmail "
+      "ligger i korpusen och väntar på att bäddas in.")
+    A("")
+    by_pend = sorted(vals, key=lambda r: -r["chunks_pending"])[:25]
+    A("| domän | kvar att bädda | GPU-tid | i Gmail | senast | signaler |")
+    A("|---|---:|---:|---:|---|---|")
+    for r in by_pend:
+        A(f"| `{r['domain']}` | {r['chunks_pending']:,} "
+          f"| {r['chunks_pending']/10/3600:.1f} h | {gm(r)} "
+          f"| {r.get('last_seen') or '–'} | {sig(r)} |")
+    A("")
+    A("**Beslut om indexering (en rad räcker, t.ex. \"sluta indexera 1-8\"):** ")
+    A("")
 
     groups = defaultdict(list)
-    for rec in ranked[25:]:
+    for rec in vals:
         groups[bucket(rec)].append(rec)
     for name in ORDER:
-        rows = groups.get(name, [])
-        if not rows:
+        rows = sorted(groups.get(name, []), key=lambda r: -r["messages"])
+        if not rows or name == "skyddad":
             continue
         msgs = sum(r["messages"] for r in rows)
         pend = sum(r["chunks_pending"] for r in rows)
         A("---")
         A("")
-        A(f"## {name} — {len(rows):,} domäner, {msgs:,} meddelanden "
-          f"({100*msgs/total_msgs:.0f} % av posten)")
+        A(f"## {name} — {len(rows):,} domäner, {msgs:,} i korpus "
+          f"({100*msgs/total_msgs:.0f} %)")
         A("")
         A(f"Frigör i indexkön: **{pend:,} chunks**, ~{pend/10/3600:.1f} GPU-timmar.")
         A("")
-        A("| domän | medd. | kvar att bädda | senast | signaler |")
-        A("|---|---:|---:|---|---|")
-        for r in rows[:20]:
+        A("| domän | i korpus | kvar att bädda | i Gmail | senast |")
+        A("|---|---:|---:|---:|---|")
+        for r in rows[:15]:
             A(f"| `{r['domain']}` | {r['messages']:,} | {r['chunks_pending']:,} "
-              f"| {r.get('last_seen') or '–'} | {row(r)} |")
-        if len(rows) > 20:
-            A(f"| *(+{len(rows)-20:,} till)* | | | | |")
+              f"| {gm(r)} | {r.get('last_seen') or '–'} |")
+        if len(rows) > 15:
+            A(f"| *(+{len(rows)-15:,} till)* | | | | |")
         A("")
         A("**Beslut för hela klustret:** ")
         A("")
@@ -423,8 +508,8 @@ def main():
 
     # En trigger-lista är ett fixture: den måste prövas mot verkligheten, annars
     # fångar den det inbillade och missar det verkliga. Rapportera nollträffarna.
-    unmatched = [t for t in MONEY_AUTHORITY_TERMS
-                 if not any(t in d for d in dom)]
+    unmatched = sorted(money_authority_labels() -
+                       {l for d in dom for l in d.split(".")})
     if unmatched:
         print(f"  pengar/myndighet-termer utan träff ({len(unmatched)}): "
               f"{', '.join(unmatched)}")
