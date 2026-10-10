@@ -201,3 +201,19 @@ A search by meaning can only find chunks that have an embedding. When part of wh
 prints one line on stderr with the count for each kind, for exactly the scope searched (`-d -P deliberus` counts
 that project's notes). The count is made live beside the search, on its own connection, so nothing is cached and
 the output on stdout is unchanged. `-k` searches by words alone and prints no such line.
+
+## Mining the mail
+
+Search answers one question. Mining asks a different one: what is in a hundred thousand mails
+nobody opened, and is any of it worth keeping? Four read-only tools in `py/` do that work.
+
+| tool | reads | answers |
+|---|---|---|
+| `corpus_mail.py` (command `corpus-mail`) | the corpus | Mail as whole messages: who sends, a sender's subjects, every message a keyword net catches, one message's full text. Each hit carries an id to read it by. |
+| `inbox_messages.py` | the live Gmail account | Every message described by several signals at once (category, read state, age, size, attachment, own labels, whether it sits in a thread the owner wrote in), weighted by the bytes it occupies. Defines the one broad cleanup rule, `in_sweep()`. |
+| `inbox_assignments.py` | the corpus | The assignments in the daily broker mails, matched to a local profile, with a check of which public ads are still open. |
+| `inbox_inventory.py` | the corpus | The older per-sender-domain table. |
+
+Chunks overlap by `CHUNK_OVERLAP` characters, so a message is rebuilt with
+`corpus_mail.join_chunks()`, never by joining its chunks whole. Output that describes a real
+mailbox is personal data and is written outside the repo, to `~/.cache/mannaminne/inbox/`.

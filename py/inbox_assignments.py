@@ -25,6 +25,7 @@ from collections import OrderedDict
 from datetime import date, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import corpus_mail  # noqa: E402
 from mannaminne import CHUNK_OVERLAP, load_conn  # noqa: E402
 
 PROFILE_FILE = os.path.expanduser("~/.config/mannaminne/assignment_profile.txt")
@@ -47,12 +48,9 @@ def profile():
 
 
 def join_chunks(parts):
-    """A mail's text from its chunks. Chunks overlap, so each one after the
-    first repeats the tail of the one before it; joining them whole doubles
-    words at every boundary and splits a title in two."""
-    if not parts:
-        return ""
-    return re.sub(r"\s+", " ", parts[0] + "".join(p[CHUNK_OVERLAP:] for p in parts[1:]))
+    """A mail's text on one line. corpus_mail.join_chunks drops the overlap
+    between chunks; the lists these mails carry are then split on spaces."""
+    return re.sub(r"\s+", " ", corpus_mail.join_chunks(parts))
 
 
 def parse_deploja(text):
