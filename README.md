@@ -218,6 +218,11 @@ A mail's class follows its sender's domain, read from `~/.config/mannaminne/emai
 A `subject:` line there outranks the domain, for machine mail sent from a domain whose human
 mail is kept, and steps around replies and forwards.
 
+Lists that describe one person's mail live beside it in `~/.config/mannaminne/`, never in this
+repository: `inbox_protect_labels.txt` (senders whose mail is never proposed for deletion, one
+domain label per line), `inbox_bulk_labels.txt`, `own_addresses.txt`. The two inbox tools
+refuse to run without a protect list: an empty one would look exactly like one that works.
+
 Chunks overlap by `CHUNK_OVERLAP` characters, so a message is rebuilt with
 `corpus_mail.join_chunks()`, never by joining its chunks whole. Output that describes a real
 mailbox is personal data and is written outside the repo, to `~/.cache/mannaminne/inbox/`.
