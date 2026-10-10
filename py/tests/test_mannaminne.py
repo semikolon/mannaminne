@@ -900,6 +900,50 @@ class EmailSubjectRuleTests(unittest.TestCase):
             self.skipTest(f"index unreachable or busy: {e}")
 
 
+class EmailDomainRuleConflictTests(unittest.TestCase):
+    """Two sender rules can cover the same mail: `reading m.mail.coursera.org` and
+    `keep coursera.org`. The more specific one wins, whatever their order in the file."""
+
+    RULES = {"m.mail.coursera.org": "reading", "coursera.org": "keep", "gmail.com": "keep"}
+
+    def test_the_more_specific_rule_wins(self):
+        self.assertEqual(m._winning_rule("m.mail.coursera.org", self.RULES), ("m.mail.coursera.org", "reading"))
+        self.assertEqual(m._winning_rule("news.coursera.org", self.RULES), ("coursera.org", "keep"))
+        self.assertEqual(m._winning_rule("coursera.org", self.RULES), ("coursera.org", "keep"))
+
+    def test_a_rule_matches_whole_domain_parts_only(self):
+        self.assertIsNone(m._winning_rule("notcoursera.org", self.RULES))
+        self.assertIsNone(m._winning_rule("coursera.org.example.com", self.RULES))
+        self.assertIsNone(m._winning_rule(None, self.RULES))
+
+    def test_live_every_ruled_sender_carries_its_most_specific_rules_class(self):
+        """Against the real index: the class table is where the rules leave it, so
+        running the rules again would change nothing (no two rules rewriting each other)."""
+        domains, _ = m._load_email_rules()
+        if not domains:
+            self.skipTest("no sender rules configured")
+        try:
+            conn = m.load_conn()
+            cur = conn.cursor()
+            cur.execute("SET statement_timeout='60s'")
+            cur.execute("""SELECT e.domain, e.class, count(*) FROM email_class e
+                           WHERE e.domain IS NOT NULL AND e.set_by IS DISTINCT FROM 'subject' GROUP BY 1, 2""")
+            rows = cur.fetchall()
+            cur.execute("SELECT DISTINCT e.class FROM email_class e")
+            conn.rollback()
+        except m_psycopg_errors() as e:
+            self.skipTest(f"index unreachable or busy: {e}")
+        _, subjects = m._load_email_rules()
+        subject_classes = {cls for _, cls in subjects}
+        wrong = []
+        for domain, cls, n in rows:
+            won = m._winning_rule(domain, domains)
+            # mail a subject rule took may carry that rule's class whatever its sender says
+            if won and cls != won[1] and cls not in subject_classes:
+                wrong.append((domain, cls, won, n))
+        self.assertEqual(wrong, [], f"{len(wrong)} sender(s) not on their most specific rule's class")
+
+
 def m_psycopg_errors():
     import psycopg
     return (psycopg.OperationalError, psycopg.errors.QueryCanceled, FileNotFoundError)

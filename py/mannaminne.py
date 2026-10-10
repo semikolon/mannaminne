@@ -1792,7 +1792,10 @@ def _vec(v):
 #: or a Papertrail alert is close to worthless. Fully reversible: clear the table
 #: and the next embed pass picks them up.
 EMAIL_CLASS_CONFIG = os.path.expanduser("~/.config/mannaminne/email_classes.txt")
-EMBED_SKIP_CLASSES = {"telemetry", "reading"}
+#: `bulk` is set by mail_judge.py, for mail no sender rule places: a decision
+#: model reads sender and subject and says person, account or bulk. The rules
+#: above it always win, and a rule written later overrules it.
+EMBED_SKIP_CLASSES = {"telemetry", "reading", "bulk"}
 
 def _load_email_rules():
     """(domain → class, [(subject substring, class)]) from the user-editable
@@ -1823,6 +1826,19 @@ def _load_email_rules():
         pass
     return domains, subjects
 
+def _winning_rule(domain, rules):
+    """(rule's domain, class) of the most specific sender rule covering `domain`, or None.
+    A rule covers its own domain and every subdomain of it, whole parts only."""
+    if not domain:
+        return None
+    best = None
+    for rule, cls in rules.items():
+        if domain == rule or domain.endswith("." + rule):
+            if best is None or len(rule) > len(best[0]):
+                best = (rule, cls)
+    return best
+
+
 #: Which mail a `subject:` rule takes. A reply or a forward of machine mail is a
 #: person writing, so the rule steps around it: measured 2026-10-04, 551 such
 #: messages were colleagues discussing the alerts, inside a domain that is kept
@@ -1836,6 +1852,8 @@ def _ensure_email_class(conn, cur, verbose=True):
     cur.execute("""CREATE TABLE IF NOT EXISTS email_class (
                      mid text PRIMARY KEY, domain text, class text)""")
     cur.execute("CREATE INDEX IF NOT EXISTS email_class_class ON email_class (class)")
+    import mail_judge
+    mail_judge.ensure_columns(cur)   # set_by, jev_class, jev_prob: who set a class
     conn.commit()
     classes, subjects = _load_email_rules()
     if not classes and not subjects:
@@ -1871,15 +1889,27 @@ def _ensure_email_class(conn, cur, verbose=True):
                           AND {SUBJECT_RULE_SQL}
                         ON CONFLICT (mid) DO NOTHING""", {"cls": cls, "needle": needle})
     changed = 0
-    # A domain SUFFIX match, so mail.substack.com counts too.
+    # A domain SUFFIX match, so mail.substack.com counts too. Where two rules cover
+    # one sender (`reading m.mail.coursera.org` and `keep coursera.org`), the more
+    # specific rule wins, in one statement, so two rules never rewrite each other's
+    # rows on every run.
+    cur.execute("CREATE TEMP TABLE IF NOT EXISTS _domain_rule (domain text PRIMARY KEY, class text)")
+    cur.execute("TRUNCATE _domain_rule")
     for dom, cls in classes.items():
-        cur.execute("""UPDATE email_class SET class=%s
-                       WHERE class <> %s AND (domain = %s OR domain LIKE %s)
-                         AND NOT EXISTS (SELECT 1 FROM _subject_class s
-                                         WHERE s.mid = email_class.mid)""",
-                    [cls, cls, dom, "%." + dom])
-        changed += cur.rowcount
-    cur.execute("""UPDATE email_class e SET class = s.class
+        cur.execute("INSERT INTO _domain_rule VALUES (%s, %s) ON CONFLICT (domain) DO UPDATE SET class = EXCLUDED.class",
+                    (dom, cls))
+    cur.execute("""
+        WITH senders AS (SELECT DISTINCT domain FROM email_class WHERE domain IS NOT NULL),
+             won AS (SELECT DISTINCT ON (d.domain) d.domain, r.class
+                     FROM senders d JOIN _domain_rule r
+                       ON d.domain = r.domain OR d.domain LIKE '%.' || r.domain
+                     ORDER BY d.domain, length(r.domain) DESC)
+        UPDATE email_class e SET class = w.class, set_by = 'rule'
+        FROM won w
+        WHERE e.domain = w.domain AND e.class <> w.class
+          AND NOT EXISTS (SELECT 1 FROM _subject_class s WHERE s.mid = e.mid)""")
+    changed += cur.rowcount
+    cur.execute("""UPDATE email_class e SET class = s.class, set_by='rule'
                    FROM _subject_class s WHERE s.mid = e.mid AND e.class <> s.class""")
     changed += cur.rowcount
     conn.commit()
@@ -2503,13 +2533,13 @@ def _add_search_args(sp):
 
 def main():
     argv = sys.argv[1:]
-    cmds = {"ingest", "embed", "stats", "search", "eval"}
+    cmds = {"ingest", "embed", "stats", "search", "eval", "judge-mail"}
     if not argv or argv[0] not in cmds:
         sp = argparse.ArgumentParser(prog="mannaminne")
         _add_search_args(sp)
         a = sp.parse_args(argv)
         if not a.query:
-            print("usage: mannaminne <query> | ingest [--sources ...] | embed | search [-smdan] | stats")
+            print("usage: mannaminne <query> | ingest [--sources ...] | embed | search [-smdan] | stats | judge-mail")
             return
         cmd_search(a)
         return
@@ -2528,6 +2558,18 @@ def main():
         cmd_embed(sp.parse_args(rest))
     elif cmd == "stats":
         cmd_stats(None)
+    elif cmd == "judge-mail":
+        sp = argparse.ArgumentParser(prog="mannaminne judge-mail",
+                                     description="Class the mail no sender rule places, from sender and subject.")
+        sp.add_argument("--limit", type=int, default=0, help="ask about at most this many mails")
+        sp.add_argument("--workers", type=int, default=8)
+        sp.add_argument("--max-usd", type=float, default=0.25, help="stop when this much is spent")
+        sp.add_argument("--dry-run", action="store_true", help="ask about one batch and store nothing")
+        a = sp.parse_args(rest)
+        import mail_judge
+        conn = load_conn()
+        _ensure_email_class(conn, conn.cursor(), verbose=False)   # the sender rules first: they are free
+        mail_judge.run(conn, limit=a.limit, workers=a.workers, max_usd=a.max_usd, dry_run=a.dry_run)
     elif cmd == "search":
         sp = argparse.ArgumentParser(); _add_search_args(sp)
         cmd_search(sp.parse_args(rest))

@@ -205,7 +205,7 @@ the output on stdout is unchanged. `-k` searches by words alone and prints no su
 ## Mining the mail
 
 Search answers one question. Mining asks a different one: what is in a hundred thousand mails
-nobody opened, and is any of it worth keeping? Four read-only tools in `py/` do that work.
+nobody opened, and is any of it worth keeping? Five read-only tools in `py/` do that work.
 
 | tool | reads | answers |
 |---|---|---|
@@ -213,10 +213,29 @@ nobody opened, and is any of it worth keeping? Four read-only tools in `py/` do 
 | `inbox_messages.py` | the live Gmail account | Every message described by several signals at once (category, read state, age, size, attachment, own labels, whether it sits in a thread the owner wrote in), weighted by the bytes it occupies. Defines the one broad cleanup rule, `in_sweep()`. |
 | `inbox_assignments.py` | the corpus | The assignments in the daily broker mails, matched to a local profile, with a check of which public ads are still open. |
 | `inbox_inventory.py` | the corpus | The older per-sender-domain table. |
+| `inbox_valued_senders.py` | the class table and the live Gmail account | Which bulk senders the owner shows signs of valuing (mail he starred, opened or answered), as `keep` lines to paste into `email_classes.txt`. Prints only. |
 
 A mail's class follows its sender's domain, read from `~/.config/mannaminne/email_classes.txt`.
 A `subject:` line there outranks the domain, for machine mail sent from a domain whose human
 mail is kept, and steps around replies and forwards.
+
+**Mail no rule places gets a second reader** (`mail_judge.py`, command `mannaminne judge-mail`).
+The sender rules cover the large senders; what they leave is a long tail of thousands of
+domains, mostly shops and newsletters, which held 86 % of the text waiting to be embedded when
+it was measured. For that tail a decision model reads the sender and the subject, nothing else,
+and picks one of three: a person, a system reporting on the owner's own account, or bulk. Bulk
+leaves the embedding queue and stays searchable by word. What keeps it honest:
+
+- The rules run first and always win. A `keep` line written later puts a sender back in the
+  queue, because the rule pass runs on every embed. That is how a newsletter the owner values
+  stays searchable by meaning: one `keep <domain>` line.
+- Below 0.8 the mail stays unplaced. The guess and its probability are stored beside it
+  (`jev_class`, `jev_prob`), and `set_by` says who set a class (`rule` or `jev`).
+- The model is reached through a client outside this repository
+  (`~/.claude/hooks/decision_client.py`, or the file `MANNAMINNE_DECISION_CLIENT` names).
+  Without it the step does nothing. `MANNAMINNE_MAIL_JUDGE=0` switches it off.
+- Its errors lean the safe way: a newsletter signed with a first name is sometimes called a
+  person, which only keeps it in the queue.
 
 Lists that describe one person's mail live beside it in `~/.config/mannaminne/`, never in this
 repository: `inbox_protect_labels.txt` (senders whose mail is never proposed for deletion, one
