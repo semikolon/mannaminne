@@ -61,11 +61,38 @@ def parse_deploja(text):
     return out
 
 
+#: A tag that describes the card BEFORE it: another country the job may be done
+#: from, "Remote", an hourly rate. The mail prints them after the card and ends
+#: on a tag with nothing below it. Read the other way round they attach to the
+#: wrong job: a rate of 850 SEK/h and "or Helsinki" were reported on the two ads
+#: that followed the ones they belonged to (2026-10-10).
+_EWORK_TAG = re.compile(
+    r"^(?:(or [^()•]+? \([A-Z]{3}\)(?: \+ more)?)|(Remote)\b"
+    r"|(\d+(?:\.\d+)? (?:SEK|EUR)/h))\s*")
+
+
 def parse_ework(text):
-    """Assignment lines from one Ework Verama mail: 'Role Client • City'."""
+    """Assignments from one Ework Verama mail. Each is a dict: `ad` is
+    'Role Client • City', and `rate`, `remote` and `also` are its own tags."""
     body = text.split("full details.")[-1]
-    return [item.strip() for item in re.split(r"\(SWE\)\s*", body)
-            if "•" in item and 5 < len(item.strip()) < 140]
+    ads = []
+    for chunk in re.split(r"\(SWE\)\s*", body):
+        rest = chunk.strip()
+        while True:
+            m = _EWORK_TAG.match(rest)
+            if not m:
+                break
+            if ads:
+                if m.group(1):
+                    ads[-1]["also"] = m.group(1)[3:]
+                elif m.group(2):
+                    ads[-1]["remote"] = True
+                else:
+                    ads[-1]["rate"] = m.group(3)
+            rest = rest[m.end():]
+        if "•" in rest and 5 < len(rest) < 140:
+            ads.append({"ad": rest, "rate": "", "remote": False, "also": ""})
+    return ads
 
 
 def mails(cur, domain, since):
@@ -111,8 +138,8 @@ def main():
             dep.setdefault(url, (created, title))
     ew = OrderedDict()
     for created, text in mails(cur, EWORK, args.since):
-        for item in parse_ework(text):
-            ew.setdefault(item, created)
+        for ad in parse_ework(text):
+            ew.setdefault(ad["ad"], (created, ad))
     bv_mails = list(mails(cur, BRAINVILLE, args.since))
 
     print(f"# Assignments posted since {args.since}\n")
@@ -131,9 +158,11 @@ def main():
                 state = f" | open, deadline {r[1] or '?'}, {r[2]}"
         print(f"- {created} | {title}{state} | {url}")
     print(f"\n## Ework Verama: {len(ew)} ads, details behind a login\n")
-    for item, created in ew.items():
+    for item, (created, ad) in ew.items():
         if want.search(item):
-            print(f"- {created} | {item}")
+            tags = [t for t in (ad["rate"], "remote" if ad["remote"] else "",
+                                f"or {ad['also']}" if ad["also"] else "") if t]
+            print(f"- {created} | {item}" + (f" | {', '.join(tags)}" if tags else ""))
     print(f"\n## Brainville: {len(bv_mails)} daily lists, details behind a login\n")
     seen = set()
     for created, text in bv_mails:
