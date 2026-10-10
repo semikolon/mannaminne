@@ -214,6 +214,10 @@ nobody opened, and is any of it worth keeping? Four read-only tools in `py/` do 
 | `inbox_assignments.py` | the corpus | The assignments in the daily broker mails, matched to a local profile, with a check of which public ads are still open. |
 | `inbox_inventory.py` | the corpus | The older per-sender-domain table. |
 
+A mail's class follows its sender's domain, read from `~/.config/mannaminne/email_classes.txt`.
+A `subject:` line there outranks the domain, for machine mail sent from a domain whose human
+mail is kept, and steps around replies and forwards.
+
 Chunks overlap by `CHUNK_OVERLAP` characters, so a message is rebuilt with
 `corpus_mail.join_chunks()`, never by joining its chunks whole. Output that describes a real
 mailbox is personal data and is written outside the repo, to `~/.cache/mannaminne/inbox/`.
