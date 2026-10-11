@@ -197,6 +197,10 @@ and sessions (at most 30 more), whether or not the bulk queue is paused, so
 that search by meaning does not go blind on the notes and code in daily use while an email backlog waits.
 It did from 2026-09-05 to 2026-10-09: the pause meant for the backlog stopped everything.
 
+`mannaminne embed --kind email --sender example.org` does the same for mail from chosen senders. The
+nightly ingest runs it for the domains in `~/.config/mannaminne/embed_first_senders.txt` (at most 30
+minutes), for a newsletter the owner wants searchable by meaning ahead of the mail queue.
+
 ## A search says when it is partial
 
 A search by meaning can only find chunks that have an embedding. When part of what a search covered has none, it
@@ -211,7 +215,7 @@ nobody opened, and is any of it worth keeping? Five read-only tools in `py/` do 
 
 | tool | reads | answers |
 |---|---|---|
-| `corpus_mail.py` (command `corpus-mail`) | the corpus | Mail as whole messages: who sends, a sender's subjects, every message a keyword net catches, one message's full text. Each hit carries an id to read it by. |
+| `corpus_mail.py` (command `corpus-mail`) | the corpus | Mail as whole messages: who sends, a sender's subjects, every message a keyword net catches, one message's full text. Each hit carries an id to read it by. `export` writes one sender's messages as one text, oldest first, with the link addresses removed (in a newsletter they are a third of the bytes and none of the content). |
 | `inbox_messages.py` | the live Gmail account | Every message described by several signals at once (category, read state, age, size, attachment, own labels, whether it sits in a thread the owner wrote in), weighted by the bytes it occupies. Defines the one broad cleanup rule, `in_sweep()`. |
 | `inbox_assignments.py` | the corpus | The assignments in the daily broker mails, matched to a local profile, with a check of which public ads are still open. |
 | `inbox_inventory.py` | the corpus | The older per-sender-domain table. |

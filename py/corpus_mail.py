@@ -9,6 +9,7 @@ read it whole, filtered by sender, sender domain and date.
   titles   one sender's subjects, newest first
   search   messages where a query matches, with the matching line
   read     one message's full text
+  export   one sender's messages as one text, oldest first, links stripped
 
 READ-ONLY. Keyword search only, so every query rides the full-text index.
 
@@ -35,6 +36,16 @@ def join_chunks(parts):
     if not parts:
         return ""
     return parts[0] + "".join(p[CHUNK_OVERLAP:] for p in parts[1:])
+
+
+_LINK = re.compile(r"[ \t]*\(\s*https?://[^\s)]+\s*\)|[ \t]*https?://\S+")
+
+
+def strip_links(text):
+    """A mail's words without its link addresses. Newsletters store every link as
+    a tracking address in parentheses, often longer than the sentence around it;
+    for reading a sender whole they are most of the bytes and none of the content."""
+    return _LINK.sub("", text)
 
 
 def _filters(args, alias="h"):
@@ -121,6 +132,32 @@ def cmd_read(cur, args):
         print()
 
 
+def cmd_export(cur, args):
+    """Every message the filters select, oldest first, as one readable text:
+    a header line with id, date and subject, then the body without link addresses."""
+    if not (args.domain or args.sender):
+        sys.exit("export needs --domain or --sender: a whole mailbox is not one reading")
+    where, par = _filters(args)
+    cur.execute(f"""SELECT h.source_id, left(h.created, 10), h.title
+                    FROM chunks h LEFT JOIN email_class e ON e.mid = h.source_id
+                    WHERE {where} ORDER BY h.created ASC LIMIT %s""", par + [args.limit])
+    heads = cur.fetchall()
+    out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
+    chars = 0
+    for mid, created, title in heads:
+        cur.execute("SELECT text FROM chunks WHERE source_id=%s ORDER BY chunk_idx", (mid,))
+        body = strip_links(join_chunks([r[0] for r in cur.fetchall()]))
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        if args.max_chars_each:
+            body = body[:args.max_chars_each]
+        chars += len(body)
+        out.write(f"\n===== {mid} | {created} | {title}\n{body}\n")
+    if args.out:
+        out.close()
+    print(f"-- {len(heads)} message(s), {chars} characters"
+          + (f", written to {args.out}" if args.out else ""), file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -140,6 +177,11 @@ def main():
     p.add_argument("--by", choices=["date", "hits"], default="hits",
                    help="hits: messages where the query matches in most places first")
     p.add_argument("--brief", action="store_true", help="no matching line")
+    p = sub.add_parser("export", help="one sender's messages as one text, links stripped")
+    common(p)
+    p.set_defaults(limit=5000)
+    p.add_argument("--out", help="write here; put it outside any repository")
+    p.add_argument("--max-chars-each", type=int, default=0, help="cut each message (0: whole)")
     p = sub.add_parser("read")
     p.add_argument("mid", nargs="+")
     p.add_argument("--max-chars", type=int, default=14000)
@@ -150,7 +192,7 @@ def main():
     cur = conn.cursor()
     cur.execute("SET statement_timeout='90s'")
     {"senders": cmd_senders, "titles": cmd_titles, "search": cmd_search,
-     "read": cmd_read}[args.cmd](cur, args)
+     "read": cmd_read, "export": cmd_export}[args.cmd](cur, args)
 
 
 if __name__ == "__main__":

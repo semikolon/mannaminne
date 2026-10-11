@@ -81,6 +81,26 @@ class EmbedScope(unittest.TestCase):
         self.assertEqual(list(params[:2]), [["deliberus"], ["doc"]])
         self.assertEqual(sql.count("%s"), len(params))
 
+    def test_senders_narrow_to_mail_from_those_domains_and_their_subdomains(self):
+        sql, params = m._embed_scope(None, None, ["newsletter.example"])
+        self.assertIn("email_class", sql)
+        self.assertIn("e.mid = c.source_id", sql)
+        self.assertEqual(params, [["newsletter.example"], ["%.newsletter.example"]])
+        with self.assertRaises(SystemExit):
+            m._embed_scope(None, None, [])
+
+    def test_a_sender_scoped_run_passes_its_scope_to_both_queries(self):
+        conn = FakeConn()
+        args = types.SimpleNamespace(limit=0, project=None, kind=None, sender=["newsletter.example"])
+        with mock.patch.object(m, "load_conn", return_value=conn), \
+                mock.patch.object(m, "_ensure_email_class"):
+            m.cmd_embed(args)
+        selects = [(s, p) for s, p in conn.cur.calls if s.startswith("SELECT c.id,c.text")]
+        sql, params = selects[0]
+        self.assertIn("e.domain = ANY(%s)", sql)
+        self.assertEqual(list(params[:2]), [["newsletter.example"], ["%.newsletter.example"]])
+        self.assertEqual(sql.count("%s"), len(params))
+
     def test_an_unscoped_run_is_unchanged(self):
         conn = FakeConn()
         with mock.patch.object(m, "load_conn", return_value=conn), \

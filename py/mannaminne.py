@@ -1921,8 +1921,9 @@ def _ensure_email_class(conn, cur, verbose=True):
             mark = "  (skipped for embedding)" if cls in EMBED_SKIP_CLASSES else ""
             print(f"    {cls}: {n} messages{mark}", flush=True)
 
-def _embed_scope(projects, kinds):
-    """SQL fragment and parameters that narrow the embed queue to chosen projects and source kinds.
+def _embed_scope(projects, kinds, senders=None):
+    """SQL fragment and parameters that narrow the embed queue to chosen projects, source kinds and
+    mail senders (a sender is a domain; its subdomains count).
 
     None means no narrowing. A filter, never an ordering, so a scoped run finishes when ITS chunks are
     done however long the rest of the queue is. An empty list is refused, since reading it as
@@ -1935,6 +1936,13 @@ def _embed_scope(projects, kinds):
             raise SystemExit(f"embed: {flag} needs at least one name")
         sql += f" AND {column} = ANY(%s)"
         params.append(list(values))
+    if senders is not None:
+        if not senders:
+            raise SystemExit("embed: --sender needs at least one domain")
+        doms = [d.strip().lower() for d in senders if d.strip()]
+        sql += (" AND EXISTS (SELECT 1 FROM email_class e WHERE e.mid = c.source_id"
+                " AND (e.domain = ANY(%s) OR e.domain LIKE ANY(%s)))")
+        params += [doms, ["%." + d for d in doms]]
     return sql, params
 
 def cmd_embed(args):
@@ -1942,7 +1950,8 @@ def cmd_embed(args):
     cur = conn.cursor()
     _ensure_email_class(conn, cur)
     scope_sql, scope_params = _embed_scope(getattr(args, "project", None) if args else None,
-                                           getattr(args, "kind", None) if args else None)
+                                           getattr(args, "kind", None) if args else None,
+                                           getattr(args, "sender", None) if args else None)
     cur.execute("SELECT count(*) FROM chunks c WHERE c.embedding IS NULL" + scope_sql, scope_params)
     pending = cur.fetchone()[0]
     max_total = getattr(args, "limit", 0) if args else 0
@@ -2581,6 +2590,8 @@ def main():
                         help="embed only these projects' chunks, e.g. --project deliberus")
         sp.add_argument("--kind", nargs="*", default=None,
                         help="embed only these source kinds: doc, code, git_commit, session, ...")
+        sp.add_argument("--sender", nargs="*", default=None,
+                        help="only mail from these sender domains (subdomains count)")
         cmd_embed(sp.parse_args(rest))
     elif cmd == "stats":
         cmd_stats(None)
