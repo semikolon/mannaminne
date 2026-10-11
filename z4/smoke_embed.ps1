@@ -16,7 +16,7 @@ for($i=0; $i -lt $WaitSec; $i++){
 Write-Output ("READY=" + $ok + " after ${i}s")
 if($ok){
   try {
-    $body = @{ input = @("hello world","skuldsanering and inkasso krav") } | ConvertTo-Json
+    $body = @{ input = @("hello world","hybrid search over a personal corpus") } | ConvertTo-Json
     $r = Invoke-RestMethod -Uri "http://127.0.0.1:8081/v1/embeddings" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 30
     $e0 = $r.data[0].embedding
     Write-Output ("COUNT=" + $r.data.Count + " DIM=" + $e0.Count)

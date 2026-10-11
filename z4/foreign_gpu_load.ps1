@@ -30,7 +30,7 @@ $vals = @()
   try { $vals += [int](nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>$null) } catch {}
   Start-Sleep -Milliseconds $IntervalMs
 }
-if($vals.Count -eq 0){ exit 0 }   # can't measure -> assume busy, protect Mats
+if($vals.Count -eq 0){ exit 0 }   # can't measure -> assume busy, protect the owner
 
 # Median, not mean: a single spike from a window redraw should not cede.
 $sorted = $vals | Sort-Object

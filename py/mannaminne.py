@@ -2022,9 +2022,9 @@ def cmd_embed(args):
 
 #: ⚠️ Was `[a-z0-9]+`, which SHREDDED every Swedish word containing å, ä or ö —
 #: silently, since the fragments are valid tokens that simply match nothing.
-#: Measured 2026-08-16: `försörjningsstöd` → ['rs', 'rjningsst'] · `hälsa` → ['lsa']
+#: What it did to real words: `smörgåsbord` → ['sm', 'rg', 'sbord'] · `hälsa` → ['lsa']
 #: · `varför` → ['varf'] · `böcker` → ['cker']. Roughly half this corpus is Swedish,
-#: and `försörjningsstöd` is among the highest-value query terms in it, so soft-term
+#: and the words that carry å, ä or ö are among its most searched, so soft-term
 #: search had been quietly blind to a large slice of the material. `\w` with re.UNICODE
 #: keeps letters from any language; the underscore is stripped separately so
 #: snake_case identifiers still split into their parts for code search.
@@ -2071,16 +2071,16 @@ _SOFT_QUERY_STOP_TERMS = _QUERY_STOP_TERMS | _SWEDISH_STOP_TERMS | {
 SEARCH_SOFT_CANDIDATE_CAP = _env_int("MANNAMINNE_SOFT_CANDIDATE_CAP", 5000)
 
 #: Swedish builds meaning by COMPOUNDING, not by inflecting, which is precisely
-#: what exact-token matching misses: `skuld` never reaches `skulder`,
-#: `skuldsanering`, `skuldsatt`. Measured recall against the live index
-#: (2026-08-16, set membership so load-independent): `skuld` 645 → 4 519 (7.0x),
-#: `bostad` 1 173 → 6 778 (5.8x), `hyra` 2 882 → 4 060 (1.4x).
+#: what exact-token matching misses: `möte` never reaches `möten`,
+#: `mötesrum`, `mötesprotokoll`. Measured recall against the live index
+#: (set membership so load-independent): `möte` 4 127 → 8 506 (2.1x, 2026-10-11),
+#: `bostad` 1 173 → 6 778 (5.8x), `hyra` 2 882 → 4 060 (1.4x) (both 2026-08-16).
 #: A prefix query is a superset of its exact term, so this ADDS recall without
 #: losing any hit, and it stays ONE query per term — no extra round trips.
 #: Swedish STEMMING was the obvious alternative and was measured and rejected:
-#: the snowball stemmer unifies only 1 of 4 real pairs (`skuld`/`skulder` yes;
-#: `bostad`/`bostäder`, `hyra`/`hyran`, `försörjningsstöd`/`försörjningsstödet`
-#: no) and mangles English in a mixed corpus (`files` → `fil`).
+#: the snowball stemmer unifies only 1 of 4 real pairs (`möte`/`möten` yes;
+#: `möte`/`mötesrum`, `bostad`/`bostäder`, `hyra`/`hyran` no; re-measured
+#: 2026-10-11) and mangles English in a mixed corpus (`files` → `fil`).
 #: Short prefixes explode (`bil:*` → bilaga, bild, billig), hence the floor.
 #: Kill-switch: MANNAMINNE_SOFT_PREFIX=0 restores exact-only matching.
 SOFT_PREFIX = os.environ.get("MANNAMINNE_SOFT_PREFIX", "1") not in ("0", "false", "")
@@ -2422,8 +2422,34 @@ def _pctl(values, pct: float) -> float:
     idx = min(len(vals) - 1, max(0, int(round((len(vals) - 1) * pct))))
     return vals[idx]
 
+#: A query set written against one person's corpus is that person's data: the
+#: questions say what is in the corpus. So the real sets live outside the
+#: repository, beside the other personal lists, and the repository carries one
+#: invented example that shows the format.
+REPO_EVAL_EXAMPLE = Path(__file__).resolve().parents[1] / "eval" / "example_queries.json"
+
+def _eval_dir() -> Path:
+    return Path(os.environ.get("MANNAMINNE_EVAL_DIR")
+                or os.path.expanduser("~/.config/mannaminne/eval"))
+
+def _eval_file(arg) -> Path:
+    """The query set to run. No argument: the private `golden_queries.json` when
+    there is one, else the repository's example. A path that exists is used as
+    given; a bare name is looked up in the private directory."""
+    if not arg:
+        private = _eval_dir() / "golden_queries.json"
+        return private if private.is_file() else REPO_EVAL_EXAMPLE
+    given = Path(arg).expanduser()
+    if given.is_file():
+        return given
+    private = _eval_dir() / given.name
+    if private.is_file():
+        return private
+    sys.exit(f"no query set {arg!r}: looked at {given} and in {_eval_dir()}")
+
 def cmd_eval(args):
-    path = Path(args.file)
+    path = _eval_file(args.file)
+    print(f"query set: {path}", file=sys.stderr)
     cases = json.loads(path.read_text(encoding="utf-8"))
     conn = load_conn()
     rows = []
@@ -2575,7 +2601,8 @@ def main():
         cmd_search(sp.parse_args(rest))
     elif cmd == "eval":
         sp = argparse.ArgumentParser()
-        sp.add_argument("--file", default=str(Path(__file__).resolve().parents[1] / "eval/golden_queries.json"))
+        sp.add_argument("--file", default=None,
+                        help="a path, or the name of a set in ~/.config/mannaminne/eval/")
         sp.add_argument("-k", type=int, default=10)
         sp.add_argument("--keyword", action="store_true")
         sp.add_argument("--json", action="store_true")

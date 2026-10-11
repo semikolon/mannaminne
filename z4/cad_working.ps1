@@ -1,4 +1,4 @@
-# Is Mats ACTUALLY working in a CAD app right now, as opposed to having one open?
+# Is the owner ACTUALLY working in a CAD app right now, as opposed to having one open?
 #
 # Exit 0 = working (cede)   Exit 1 = open-but-idle, or absent (safe to run)
 #

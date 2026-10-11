@@ -189,7 +189,7 @@ def protected_labels():
 
 
 #: A sender is protected when one part of its domain is a protected label:
-#: `mail.lowell.se` has the part `lowell`. Whole parts only, never substrings.
+#: `mail.examplebank.se` has the part `examplebank`. Whole parts only, never substrings.
 PROTECTED_SQL = "string_to_array(lower(coalesce(e.domain, '')), '.') && %s::text[]"
 
 #: Mail that is still unplaced, has never been asked about, is not from a protected

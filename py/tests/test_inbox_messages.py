@@ -73,8 +73,8 @@ class ProtectListTests(unittest.TestCase):
         return path
 
     def test_labels_are_read_one_per_line_without_comments(self):
-        path = self.write("# authorities\nSkatteverket\n\n  lowell  \n# banks\nswedbank\n")
-        self.assertEqual(self.inv.money_authority_labels(path), {"skatteverket", "lowell", "swedbank"})
+        path = self.write("# authorities\nSkatteverket\n\n  examplebank  \n# utilities\neon\n")
+        self.assertEqual(self.inv.money_authority_labels(path), {"skatteverket", "examplebank", "eon"})
 
     def test_a_missing_list_is_refused_not_read_as_nothing_to_protect(self):
         with self.assertRaises(SystemExit):
@@ -85,8 +85,8 @@ class ProtectListTests(unittest.TestCase):
             self.inv.money_authority_labels(self.write("# nothing but a comment\n"))
 
     def test_a_label_matches_whole_domain_parts_only(self):
-        self.assertEqual(self.inv.money_hits("mail.lowell.se", {"lowell", "eon"}), ["lowell"])
-        self.assertEqual(self.inv.money_hits("moveon.org", {"lowell", "eon"}), [])
+        self.assertEqual(self.inv.money_hits("mail.examplebank.se", {"examplebank", "eon"}), ["examplebank"])
+        self.assertEqual(self.inv.money_hits("moveon.org", {"examplebank", "eon"}), [])
 
     def test_importing_the_modules_needs_no_personal_file(self):
         # A fresh clone has none. The authority query is built when a table is built.

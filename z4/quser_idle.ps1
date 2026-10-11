@@ -4,7 +4,7 @@
 # WHY quser (not GetLastInputInfo): GetLastInputInfo only reports input for the
 # CALLING process's session. An ssh process and a session-0 scheduled task both
 # live in non-interactive stations, so their idle counts up forever and never
-# reflects Mats's real activity at the physical console. quser queries the session
+# reflects the owner's real activity at the physical console. quser queries the session
 # manager and reports the true per-session idle for every logged-on session.
 # Fail-safe: prints 0 (== active) on any uncertainty -> callers err toward ceding.
 try {

@@ -135,7 +135,9 @@ plain text.
 
 ## Eval
 
-Golden queries live in `eval/golden_queries.json`.
+The query sets are personal (the questions say what is in the corpus), so they live in
+`~/.config/mannaminne/eval/`, never in this repository. `eval/example_queries.json` shows the
+format with invented questions; `eval/README.md` says how a set is chosen.
 
 ```bash
 mannaminne eval
@@ -238,7 +240,7 @@ leaves the embedding queue and stays searchable by word. What keeps it honest:
   person, which only keeps it in the queue.
 
 Lists that describe one person's mail live beside it in `~/.config/mannaminne/`, never in this
-repository: `inbox_protect_labels.txt` (senders whose mail is never proposed for deletion, one
+repository (the query sets in `eval/` there follow the same rule): `inbox_protect_labels.txt` (senders whose mail is never proposed for deletion, one
 domain label per line), `inbox_bulk_labels.txt`, `own_addresses.txt`. The two inbox tools
 refuse to run without a protect list: an empty one would look exactly like one that works.
 

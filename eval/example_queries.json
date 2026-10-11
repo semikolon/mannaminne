@@ -1,0 +1,25 @@
+[
+  {
+    "query": "why did the nightly backup skip the photo library",
+    "must_match": ["backup"],
+    "why": "plain string: any returned row that contains the word counts as a hit"
+  },
+  {
+    "query": "which note explains how the search ranks its results",
+    "scope": "doc",
+    "must_match": [{"title": "search_ranking"}],
+    "why": "scope limits the sources searched; a dict matches one field of the row"
+  },
+  {
+    "query": "where is the retry policy for the embedding client decided",
+    "scope": ["code", "git_commit"],
+    "project": "mannaminne",
+    "must_match": ["_embed_with_split", {"project": "mannaminne", "contains": "retry"}],
+    "why": "several expectations: one of them matching is enough; a dict with two keys needs both"
+  },
+  {
+    "query": "varför hittade sökningen inte ord med å ä ö",
+    "must_match": ["tokenis"],
+    "why": "a set should be written in the languages the corpus is written in"
+  }
+]

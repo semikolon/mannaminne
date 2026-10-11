@@ -175,9 +175,9 @@ class LiveTableTests(unittest.TestCase):
         self.assertEqual(self.cur.fetchone()[0], 0)
 
     def test_a_protected_sender_is_matched_by_whole_domain_parts(self):
-        self.cur.execute("SELECT " + mj.PROTECTED_SQL.replace("e.domain", "%s::text"), ("mail.lowell.se", ["lowell"]))
+        self.cur.execute("SELECT " + mj.PROTECTED_SQL.replace("e.domain", "%s::text"), ("mail.examplebank.se", ["examplebank"]))
         self.assertTrue(self.cur.fetchone()[0])
-        self.cur.execute("SELECT " + mj.PROTECTED_SQL.replace("e.domain", "%s::text"), ("slowell.se", ["lowell"]))
+        self.cur.execute("SELECT " + mj.PROTECTED_SQL.replace("e.domain", "%s::text"), ("notexamplebank.se", ["examplebank"]))
         self.assertFalse(self.cur.fetchone()[0])
 
     def test_the_question_asked_is_the_question_that_was_measured(self):

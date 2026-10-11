@@ -690,7 +690,7 @@ class SwedishTokenisationTests(unittest.TestCase):
     Swedish, so soft-term search was blind to a large slice of it."""
 
     def test_swedish_words_survive_tokenisation(self):
-        self.assertEqual(m._query_terms("försörjningsstöd"), ["försörjningsstöd"])
+        self.assertEqual(m._query_terms("smörgåsbord"), ["smörgåsbord"])
         self.assertEqual(m._query_terms("hälsa"), ["hälsa"])
         self.assertEqual(m._query_terms("återbetalning"), ["återbetalning"])
 
@@ -742,10 +742,10 @@ class SearchAgainstTheRealIndexTests(unittest.TestCase):
 
     def test_a_swedish_domain_term_actually_matches(self):
         cur = self._conn().cursor()
-        res = m._keyword_results(cur, "försörjningsstöd", "", [])
+        res = m._keyword_results(cur, "förändring", "", [])
         self.assertGreater(len(res), 0,
-                           "a core Swedish term must match; it returned nothing while "
-                           "the tokeniser was shredding it into 'rs' + 'rjningsst'")
+                           "a common Swedish word must match; it returned nothing while "
+                           "the tokeniser was shredding it into 'f' + 'r' + 'ndring'")
 
     def test_a_long_swedish_query_stays_under_the_latency_ceiling(self):
         import time
@@ -801,9 +801,9 @@ class SoftPrefixTests(unittest.TestCase):
     """
 
     def test_long_terms_are_prefix_expanded(self):
-        self.assertEqual(m._soft_tsquery("skuld"), "skuld:*")
+        self.assertEqual(m._soft_tsquery("möte"), "möte:*")
         self.assertEqual(m._soft_tsquery("bostad"), "bostad:*")
-        self.assertEqual(m._soft_tsquery("försörjningsstöd"), "försörjningsstöd:*")
+        self.assertEqual(m._soft_tsquery("förändring"), "förändring:*")
 
     def test_short_terms_stay_exact_because_short_prefixes_explode(self):
         # `bil:*` would drag in bilaga, bild, billig, bilder.
@@ -812,13 +812,13 @@ class SoftPrefixTests(unittest.TestCase):
 
     def test_kill_switch_restores_exact_matching(self):
         with mock.patch.object(m, "SOFT_PREFIX", False):
-            self.assertEqual(m._soft_tsquery("skuld"), "skuld")
+            self.assertEqual(m._soft_tsquery("möte"), "möte")
 
 
 class PrefixRecallAgainstTheRealIndexTests(unittest.TestCase):
     """Set membership, so this holds regardless of how loaded the box is.
 
-    Measured 2026-08-16: skuld 645 → 4 519, bostad 1 173 → 6 778. The assertion is
+    Measured: möte 4 127 → 8 506 (2026-10-11), bostad 1 173 → 6 778 (2026-08-16). The assertion is
     only that prefix is a strict superset, which is the property the ranking relies
     on — a prefix query can never lose a hit its exact form would have found."""
 
@@ -828,7 +828,7 @@ class PrefixRecallAgainstTheRealIndexTests(unittest.TestCase):
         except Exception:
             self.skipTest("live index unreachable")
         cur.execute("SET statement_timeout='60s'")
-        for term in ("skuld", "bostad"):
+        for term in ("möte", "bostad"):
             try:
                 cur.execute("SELECT count(*) FROM chunks WHERE tsv @@ to_tsquery('simple',%s)", [term])
                 exact = cur.fetchone()[0]
@@ -942,6 +942,48 @@ class EmailDomainRuleConflictTests(unittest.TestCase):
             if won and cls != won[1] and cls not in subject_classes:
                 wrong.append((domain, cls, won, n))
         self.assertEqual(wrong, [], f"{len(wrong)} sender(s) not on their most specific rule's class")
+
+
+class EvalFileLocationTests(unittest.TestCase):
+    """Query sets written against one person's corpus are that person's data, so
+    they live outside the repository. The repository carries one invented example."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.private = Path(self.tmp.name)
+        patcher = mock.patch.dict(os.environ, {"MANNAMINNE_EVAL_DIR": self.tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_private_set_is_the_default_when_it_exists(self):
+        (self.private / "golden_queries.json").write_text("[]", encoding="utf-8")
+        self.assertEqual(m._eval_file(None), self.private / "golden_queries.json")
+
+    def test_without_a_private_set_the_repository_example_is_used(self):
+        got = m._eval_file(None)
+        self.assertEqual(got.name, "example_queries.json")
+        self.assertTrue(got.is_file(), "the example the repository promises must exist")
+        cases = json.loads(got.read_text(encoding="utf-8"))
+        self.assertTrue(cases and all("query" in c and m._case_expectations(c) for c in cases))
+
+    def test_a_bare_name_is_looked_up_in_the_private_directory(self):
+        (self.private / "golden_queries_sv.json").write_text("[]", encoding="utf-8")
+        self.assertEqual(m._eval_file("golden_queries_sv.json"), self.private / "golden_queries_sv.json")
+
+    def test_an_existing_path_is_used_as_given(self):
+        other = self.private / "elsewhere.json"
+        other.write_text("[]", encoding="utf-8")
+        self.assertEqual(m._eval_file(str(other)), other)
+
+    def test_a_name_that_is_nowhere_says_where_it_looked(self):
+        with self.assertRaises(SystemExit) as caught:
+            m._eval_file("no_such_set.json")
+        self.assertIn(self.tmp.name, str(caught.exception))
+
+    def test_the_repository_holds_no_query_set_but_the_example(self):
+        repo_eval = Path(m.__file__).resolve().parents[1] / "eval"
+        self.assertEqual(sorted(p.name for p in repo_eval.glob("*.json")), ["example_queries.json"])
 
 
 def m_psycopg_errors():

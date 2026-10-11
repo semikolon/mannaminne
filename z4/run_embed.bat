@@ -6,8 +6,8 @@ REM restart, per E:\z4-coord\gpu-preempt.flag + Revit/AutoCAD process presence. 
 REM (e.g. -CarveOut 0 for idle-window-only, -DryRun to validate the cede).
 REM ALWAYS-ON with CAD-presence cede (CarveOut 1, Fredrik 2026-06-12 evening). Both auto-idle
 REM signals are broken on this box: per-process GPU memory reads [N/A], and quser console-idle
-REM shows "active" for hours after Mats leaves. So idle-only would never run. Instead: run
-REM continuously, and CEDE (kill the server, ~1.5s) when Revit/AutoCAD is process-present (Mats
+REM shows "active" for hours after the owner leaves. So idle-only would never run. Instead: run
+REM continuously, and CEDE (kill the server, ~1.5s) when Revit/AutoCAD is process-present (the owner
 REM doing local CAD) OR the gpu-preempt.flag is raised. Parsec-ACTIVE (rare; he flags it) is
 REM monitored by the 45-min health loop + operator, not auto-detected (parsecd is GPU-present
 REM even when idle). A GPU at 100% doesn't lock up the desktop; only CAD/Parsec would feel it.

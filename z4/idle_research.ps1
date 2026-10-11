@@ -1,6 +1,6 @@
 # idle_research.ps1 — probe reliable idle + per-process GPU signals on the Z4.
 # Run via ssh (session 0): the PERF COUNTERS are system-wide (work here); the input/foreground
-# Win32 APIs are session-scoped (will read the ssh session, not Mats's session 1 — informative only).
+# Win32 APIs are session-scoped (will read the ssh session, not the owner's session 1 — informative only).
 $ErrorActionPreference='SilentlyContinue'
 function NameOf($processId){ try { (Get-Process -Id $processId).ProcessName } catch { "?" } }
 
