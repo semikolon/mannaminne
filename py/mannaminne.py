@@ -2094,6 +2094,12 @@ SEARCH_SOFT_CANDIDATE_CAP = _env_int("MANNAMINNE_SOFT_CANDIDATE_CAP", 5000)
 #: Kill-switch: MANNAMINNE_SOFT_PREFIX=0 restores exact-only matching.
 SOFT_PREFIX = os.environ.get("MANNAMINNE_SOFT_PREFIX", "1") not in ("0", "false", "")
 SOFT_PREFIX_MIN_CHARS = _env_int("MANNAMINNE_SOFT_PREFIX_MIN_CHARS", 4)
+#: Bitmap heap scans at the default 4 MB go lossy on common terms and recheck
+#: whole pages: `need:*` touched 80 000 buffers at 4 MB and 21 000 at 64 MB.
+#: On the prior-art eval set (2026-10-16) the average search fell from 5.5 s to
+#: 1.5 s with recall and rank unchanged. Skipping very common soft terms was
+#: tried the same evening and dropped: it saved another 0.5 s but lost a hit.
+SEARCH_WORK_MEM = os.environ.get("MANNAMINNE_SEARCH_WORK_MEM", "64MB")
 
 def _soft_tsquery(term: str) -> str:
     """Prefix-expand a soft term when it is long enough to be discriminating."""
@@ -2233,6 +2239,10 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
     owned = conn is None
     conn = conn or load_conn()
     cur = conn.cursor()
+    try:
+        cur.execute(f"SET LOCAL work_mem = '{SEARCH_WORK_MEM}'")
+    except Exception:
+        pass
     # Two independent hard filters, both threaded through the existing
     # where_scope/params_scope seam (kept in placeholder order): source_kind
     # (which corpus) AND project (which repo/project). project scoping is what
