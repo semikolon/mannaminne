@@ -1,253 +1,164 @@
 # mannaminne
 
-Hybrid semantic + keyword search over Fredrik's personal life-corpus: Claude
-Code sessions, local docs, Facebook Messenger, AI-chat archives, Simplenote,
-email, Things3, Fyr tasks, screenshots, and photo labels/OCR.
+**Local search over one person's whole digital archive: notes, documents, email, chat history,
+AI-chat exports, source code, git history and the transcripts of AI coding sessions. Keyword
+search and semantic search combined in Postgres, with embeddings computed on my own hardware.**
 
-`mannaminne` means "in living memory". The old Rust binary remains in the repo
-for history, but the active implementation is:
+*mannaminne* is Swedish for living memory, as in *i mannaminne*, "within living memory".
 
-- Python CLI: `py/mannaminne.py`
-- Store: dedicated Postgres + pgvector on Darwin
-- Keyword: Postgres FTS + trigram substring
-- Semantic: Qwen3-Embedding-4B vectors, HNSW index
+## Why it exists
+
+I build most of my software together with AI coding agents. Every session starts with no memory
+of the one before, while the answers to the questions that matter most (*was this tried before?
+what did we decide, and why? where did I write about this?*) already sit somewhere in years of
+documents, commits, conversations and mail. Grep finds a passage if you guess its exact words.
+mannaminne finds it when you only remember what it was about, in Swedish or in English, and
+answers in a few seconds.
+
+I and my agents use it the same way, as a command-line tool. The agents' standing instructions
+tell them to search it before they claim that something is new, was never tried, or does not
+exist.
+
+## What it indexes
+
+| Kind | What |
+|---|---|
+| `email` | a live Gmail account, plus older mailbox archives |
+| `messenger` | Facebook Messenger history |
+| `aichat` | ChatGPT and Claude conversation exports |
+| `note` | Simplenote |
+| `doc` | Markdown and text documents in project folders and notes |
+| `session` | Claude Code transcripts, with tool output and injected instructions filtered out |
+| `code` | source files from about forty repositories, chunked along the syntax tree |
+| `git_commit` | the commit messages of the same repositories |
+| `things3`, `fyr` | task lists |
+| `screenshot` | text read from screenshots with Apple's on-device OCR |
+
+`mannaminne stats` prints the current size and how much of it has embeddings. In October 2026
+it was about 2.35 million chunks, four fifths of them mail.
+
+## How it works
+
+```
+sources ─► discover ─► chunk ─► Postgres: one table ─► search
+                                  ├─ text + tsvector        (keyword)
+                                  └─ pgvector, HNSW index   (meaning)
+                                        ▲
+                        embed on a local GPU
+```
+
+**Ingest.** Each source has a small discoverer that yields documents. A document is cut into
+chunks of about 750 characters that overlap by 80, so a phrase on a boundary is still found.
+Markdown is cut at its headings. Code is cut along its syntax tree with tree-sitter, using the
+cAST method: small sibling nodes are merged and large ones split, so a function that fits stays
+whole, and each chunk starts with its file path and symbol name so the vector knows where it
+came from. A commit message is one chunk. Every chunk carries a hash of its text, so a re-run
+rewrites only what changed and re-embeds only that. A file whose size and modification time are
+unchanged is not read at all.
+
+**Store.** One `chunks` table in Postgres 16 with pgvector. A generated `tsvector` column and a
+trigram index serve keyword search, and an HNSW index over 1024-dimensional vectors serves
+semantic search. The text, its keyword index and its vector live in the same row, so a hybrid
+query needs one database and nothing to keep in sync.
+
+**Embed.** Qwen3-Embedding-4B, served through llama.cpp's OpenAI-compatible endpoint from a
+GTX 1650 in a home server. Large backfills run on a borrowed workstation GPU when its owner is
+not using it (`z4/`). Nothing is sent to a cloud service. A query gets an instruction prefix;
+stored chunks are embedded as plain text. A chunk too dense for the server's context window is
+truncated and retried rather than dropped, and a batch that fails is split until the one bad
+item is isolated.
+
+**Search.** Keyword passes run first: an exact-phrase match for short queries, a search on all
+the terms, and a small probe per term. A vector search runs beside them. The ranked lists are
+merged with reciprocal rank fusion and de-duplicated per document, so one long conversation
+cannot fill the page. Each hit shows a snippet centred on the match. When part of the searched
+scope has no embeddings yet, the search says how much.
+
+## Design choices, and what they taught
+
+- **Keyword search is the guarantee, meaning is the bonus.** The requirement was to find any
+  needle in the haystack. Full-text search finds it the moment a chunk is ingested, before any
+  GPU time is spent, and semantic search fills in as the vectors arrive. That is how the index
+  grew to millions of chunks on a small GPU without ever being blind.
+- **Postgres instead of a separate vector database.** The first version, a small Rust tool from
+  March 2026 (`src/`), kept its index in memory and embedded only the first 800 or so characters
+  of each item. The rebuild on Postgres in June gave full coverage, one store for both kinds of
+  search, and an index that does not have to fit in memory.
+- **Swedish needs its own care.** About half the archive is Swedish. The keyword index uses
+  Postgres' `simple` configuration, without stemming: the Swedish stemmer joined one of four real
+  word pairs it was tested on and mangled the English half of the corpus (*files* became *fil*).
+  Swedish builds meaning by compounding (*möte*, *mötesprotokoll*), so terms of four letters or
+  more are also matched as prefixes, which doubled the hits for a word like *möte*.
+- **Test against the real index, not only against fixtures.** An early tokenizer pattern quietly
+  split every word containing å, ä or ö, and ranking every match of a common word made long
+  queries take close to a minute. Both passed the unit tests, which were written in English and
+  ran on a handful of rows. Two tests now run against the live index: a Swedish word must match,
+  and a long Swedish query must stay under a time limit. Capping the candidate set took that
+  query from about 50 seconds to under two.
+- **A snippet is what the reader decides from.** The first 200 characters of a chunk often had
+  nothing to do with why it matched. Snippets are now centred on the match, at the same cost.
+- **Newer wins on the project record, not in life.** For documents, sessions, commits and code, a
+  small recency term lets a newer note outrank an older one on the same topic that it replaced.
+  Mail and messages get no such term; a letter from 2012 should stay as findable as one from
+  last week.
+- **Measure before adding cleverness.** A reranker, GraphRAG and query rewriting were each weighed
+  against published results and against this corpus. Query rewriting hurts retrieval when the
+  query already uses the corpus's own words, and it costs a model call before every search.
+  GraphRAG suits corpora with a few clear kinds of entity, and sixteen years of mail, chat and
+  code has no such shape. A reranker is worth adding once a Swedish evaluation set can say which
+  one, and `mannaminne eval` exists for that.
 
 ## Usage
 
 ```bash
-mannaminne "kausal inferens Kaus"
-mannaminne search -d "Z4 embedder backlog HNSW"
-mannaminne search --keyword "exact phrase"
-mannaminne stats
-mannaminne ingest --sources doc
-mannaminne embed
-mannaminne embed --limit 500
-mannaminne eval --show-top
+mannaminne "when did we decide to drop the MCP server"    # search everything
+mannaminne -d "chunk size for code"                        # documents only
+mannaminne -c -g "retry logic" -P myrepo                   # code and commits in one repository
+mannaminne -k "an exact phrase"                            # keyword layers only, no GPU
+mannaminne stats                                           # size and embedding coverage
+mannaminne eval                                            # recall, MRR and latency on a query set
+mannaminne ingest                                          # discover, chunk and upsert all sources
+mannaminne embed --limit 500                               # fill missing embeddings
 ```
 
-Aliases:
+Source flags narrow a search to one or more kinds: `-s` sessions, `-d` docs, `-m` Messenger,
+`-a` AI chats, `--note`, `-e` email, `-t` Things 3, `-f` Fyr, `-p` screenshots, `-g` commits,
+`-c` code. `-P` (also `--repo`) narrows to named projects; put it last, since it takes several
+names. Invoked as `ccsearch`, the tool searches sessions, docs, commits and code by default.
 
-| Invoke as | Scope |
+## Running it yourself
+
+`setup.sh` provisions my own machines (a home server reached over ssh) and is best read as a
+recipe. What it needs:
+
+- Python 3 with `psycopg` and, for the code chunker, `tree-sitter` with
+  `tree-sitter-language-pack`
+- Postgres 16 with the `vector` and `pg_trgm` extensions, and the `chunks` table from `setup.sh`
+- an OpenAI-compatible embeddings endpoint serving a model with 1024-dimensional output, set with
+  `MANNAMINNE_EMBED_URL`
+- the connection in `~/.config/mannaminne/db.env` (`MANNAMINNE_PG_HOST`, `_PORT`, `_DB`, `_USER`,
+  `_PASSWORD`)
+
+Where each source is read from is set in its `discover_*` function in `py/mannaminne.py`. Most
+of those paths point at my own machines and need editing; a few can be set from the environment
+(`MANNAMINNE_SESSION_PATHS`, `MANNAMINNE_GIT_REPOS`).
+
+Lists that describe one person's data stay outside the repository, in `~/.config/mannaminne/`:
+the evaluation query sets, the list of repositories to index, and the rules that class mail by
+sender. `eval/example_queries.json` shows the query-set format with invented questions.
+
+## Repository layout
+
+| Path | What |
 |---|---|
-| `mannaminne` / `minne` | all sources |
-| `ccsearch` | legacy CC scope: sessions + docs |
-
-Source flags override the invocation default:
-
-```bash
--s / --session
--d / --doc
--m / --messenger
--a / --aichat
---note
--e / --email
--t / --things3
--f / --fyr
--p / --photos
-```
-
-## Embedding Endpoint Selection
-
-If `MANNAMINNE_EMBED_URL` is set, it is used exactly.
-
-Otherwise runtime default order is:
-
-1. Z4 tunnel: `MANNAMINNE_Z4_EMBED_URL`, default `http://127.0.0.1:8081/v1/embeddings`
-2. Darwin fallback: `MANNAMINNE_DARWIN_EMBED_URL`, default `http://192.168.4.1:8080/v1/embeddings`
-
-Darwin-safe defaults are intentionally conservative:
+| `py/mannaminne.py` | the CLI: ingest, embed, search, stats, eval |
+| `py/code_chunker.py` | the cAST chunker over tree-sitter |
+| `py/corpus_mail.py`, `py/inbox_*.py`, `py/mail_judge.py` | read-only tools for working through a large mail archive: whole messages from chunks, senders, and which bulk mail can skip the embedding queue |
+| `py/tests/` | unit tests, plus the tests against the live index, which skip when it is unreachable |
+| `eval/` | the query-set format and how a set is chosen |
+| `z4/` | scripts for bulk embedding on a borrowed Windows workstation, with a guard that stops when its owner starts working |
+| `src/` | the first version, in Rust, kept for its history |
 
 ```bash
-MANNAMINNE_EMBED_BATCH_SIZE=4
-MANNAMINNE_EMBED_WORKERS=2
-MANNAMINNE_EMBED_SELECT_LIMIT=500
-MANNAMINNE_EMBED_TIMEOUT=45
-MANNAMINNE_EMBED_PROBE_TIMEOUT=5
+cd py && .venv/bin/python -m unittest discover -s tests -v
 ```
-
-For a Z4 batch run, override these upward after the Z4 server/tunnel is live.
-
-## The email index is NOT a view of your Gmail account
-
-It is the union of the live account and the mbox archives in `MBOX_SOURCES`, and
-on this corpus the archive is much the larger half: the single biggest sender has
-**140 572 messages in the FERMI archive and 95 in Gmail**. Anyone reasoning about
-"the email corpus" as though it were the inbox will be wrong by that margin, and
-`project` cannot tell them apart — the ingest hardcodes `"gmail"` for both.
-
-Two things follow. **Deleting mail from Gmail does not remove it here**: email is
-marked `PARTIAL` on every ingest and excluded from the orphan prune by name, so
-chunks outlive their messages. And **corpus volume is the wrong ranking for any
-storage decision**, since a sender can be enormous here and absent there.
-
-Full measurement + the inbox-cleanup arc:
-`~/dotfiles/docs/gmail_storage_and_index_pruning_2026-09-06.md`.
-
-## Indexing
-
-`ingest` discovers source content, chunks it, and upserts rows. If text changes,
-the chunk's embedding is reset to `NULL` so `embed` can refill it.
-
-**Unchanged files are skipped per FILE, not per kind** (2026-09-05). A fingerprint of
-`mtime_ns:size` gates the five discoverers that walk files — docs, sessions, code, git
-commits, screenshots — and a skipped file's `source_id` is carried into the `_seen`
-anti-join so the prune does not delete chunks whose file was never read. Fingerprints
-are saved only when a kind completes, so an interrupted run re-reads rather than
-silently skipping, and a failed carry-forward drops that kind from the prune entirely
-rather than risking deletion. Before this, `_skip_if_unchanged` worked per KIND, so one
-edited file re-chunked the whole kind: ~295 000 chunks re-upserted nightly for ~1 500
-new ones, and a run that occupied 05:00–11:00 every day
-(`docs/nightly_ingest_cost_2026-09-05.md`). The LaunchAgent also runs at background
-priority now, so a long run yields to whoever is at the keyboard.
-
-Docs use heading-aware markdown chunks. The global
-`~/.claude/CLAUDE.md` file is indexed as a special doc source because it contains
-high-value operating context outside the usual docs roots.
-
-`embed` fills `NULL` embeddings. Failed batches are split recursively, so one bad
-batch does not poison the whole pending set. Use `embed --limit N` for bounded
-smoke tests or staged backfills.
-
-**Scheduled (Mac Mini):** two launchd jobs run nightly — **except that the embed drainer is `launchctl disable`d since 2026-09-05** so it does not grind the same queue as the Z4 backfill; re-enable (`launchctl enable` + `bootstrap`) once the Z4 has drained the queue, or new chunks stop being embedded. The jobs: a **02:00 embed-only
-backlog drainer** (`mannaminne-scheduled-embed`, ~3h budget, quiet-hour so it
-never contends with daytime embedder use) and the **05:00 full ingest+embed**
-(`mannaminne-ingest-runner` → `mannaminne-scheduled-ingest`, ~1h embed budget,
-runs after the 04:00 nightly-sweep that archives CC sessions >90d to FERMI). Both
-are budget-capped and resume from committed progress. Deployment detail (the
-nit-tracked plists, the FDA-granted responsible-process runner that reads
-~/Documents + FERMI with no TCC dialog, the FERMI-mount guard) lives in global
-`~/.claude/CLAUDE.md` § mannaminne.
-
-## Search Ranking
-
-Search is hybrid:
-
-1. Keyword candidates from layered Postgres FTS:
-   exact phrase for short queries, strict all-term FTS, then small per-term
-   recall probes for useful non-filler terms.
-2. Semantic candidates from pgvector.
-3. Reciprocal-rank fusion combines the layers, with a small exact-match boost.
-4. Final results are de-duplicated by source object so one long conversation or
-   doc cannot fill the whole first page with adjacent chunks.
-
-The query embedding uses a Qwen3 instruction prefix; stored document chunks stay
-plain text.
-
-## Eval
-
-The query sets are personal (the questions say what is in the corpus), so they live in
-`~/.config/mannaminne/eval/`, never in this repository. `eval/example_queries.json` shows the
-format with invented questions; `eval/README.md` says how a set is chosen.
-
-```bash
-mannaminne eval
-mannaminne eval --keyword
-mannaminne eval -k 20 --json
-```
-
-The eval command reports recall@k, MRR, average latency, and p95 latency against
-the live DB. It is meant as a small regression harness before changing chunking,
-fusion, model, or storage settings.
-
-## Tests
-
-Tests use Python's standard `unittest`, no pytest dependency:
-
-```bash
-cd ~/Projects/mannaminne/py
-.venv/bin/python -m unittest discover -s tests -v
-```
-
-Current tests cover:
-
-- char and markdown chunking
-- NUL stripping and chunk hashes
-- Z4-first endpoint preference with Darwin fallback
-- recursive embedding batch split
-- rank fusion
-- query term pruning
-- source de-duplication
-- eval expectation matching
-
-## Setup
-
-Fresh provisioning:
-
-```bash
-cd ~/Projects/mannaminne
-./setup.sh
-```
-
-This creates the venv, wrappers in `~/.local/bin`, and the Darwin pgvector
-Postgres container/schema. DB credentials live only in
-`~/.config/mannaminne/db.env`.
-
-Design and operational notes:
-
-- `~/dotfiles/docs/personal_archives_semantic_search_2026_06_10.md`
-- `~/Projects/mannaminne/z4/README.md`
-- `~/dotfiles/docs/local_codebase_semantic_search_research_plan_2026_06_14.md`
-
-## Embedding chosen projects first
-
-`mannaminne embed --project deliberus --kind doc` embeds only that project's note chunks and stops when
-they are done. Both flags take several names. The nightly ingest runs this for every project named in
-`~/.config/mannaminne/embed_first.txt` (at most 30 minutes), and then for every project's notes, code, commits
-and sessions (at most 30 more), whether or not the bulk queue is paused, so
-that search by meaning does not go blind on the notes and code in daily use while an email backlog waits.
-It did from 2026-09-05 to 2026-10-09: the pause meant for the backlog stopped everything.
-
-`mannaminne embed --kind email --sender example.org` does the same for mail from chosen senders. The
-nightly ingest runs it for the domains in `~/.config/mannaminne/embed_first_senders.txt` (at most 30
-minutes), for a newsletter the owner wants searchable by meaning ahead of the mail queue.
-
-## A search says when it is partial
-
-A search by meaning can only find chunks that have an embedding. When part of what a search covered has none, it
-prints one line on stderr with the count for each kind, for exactly the scope searched (`-d -P deliberus` counts
-that project's notes). The count is made live beside the search, on its own connection, so nothing is cached and
-the output on stdout is unchanged. `-k` searches by words alone and prints no such line.
-
-## Mining the mail
-
-Search answers one question. Mining asks a different one: what is in a hundred thousand mails
-nobody opened, and is any of it worth keeping? Five read-only tools in `py/` do that work.
-
-| tool | reads | answers |
-|---|---|---|
-| `corpus_mail.py` (command `corpus-mail`) | the corpus | Mail as whole messages: who sends, a sender's subjects, every message a keyword net catches, one message's full text. Each hit carries an id to read it by. `export` writes one sender's messages as one text, oldest first, with the link addresses removed (in a newsletter they are a third of the bytes and none of the content). |
-| `inbox_messages.py` | the live Gmail account | Every message described by several signals at once (category, read state, age, size, attachment, own labels, whether it sits in a thread the owner wrote in), weighted by the bytes it occupies. Defines the one broad cleanup rule, `in_sweep()`. |
-| `inbox_assignments.py` | the corpus | The assignments in the daily broker mails, matched to a local profile, with a check of which public ads are still open. |
-| `inbox_inventory.py` | the corpus | The older per-sender-domain table. |
-| `inbox_valued_senders.py` | the class table and the live Gmail account | Which bulk senders the owner shows signs of valuing (mail he starred, opened or answered), as `keep` lines to paste into `email_classes.txt`. Prints only. |
-
-A mail's class follows its sender's domain, read from `~/.config/mannaminne/email_classes.txt`.
-A `subject:` line there outranks the domain, for machine mail sent from a domain whose human
-mail is kept, and steps around replies and forwards.
-
-**Mail no rule places gets a second reader** (`mail_judge.py`, command `mannaminne judge-mail`).
-The sender rules cover the large senders; what they leave is a long tail of thousands of
-domains, mostly shops and newsletters, which held 86 % of the text waiting to be embedded when
-it was measured. For that tail a decision model reads the sender and the subject, nothing else,
-and picks one of three: a person, a system reporting on the owner's own account, or bulk. Bulk
-leaves the embedding queue and stays searchable by word. What keeps it honest:
-
-- The rules run first and always win. A `keep` line written later puts a sender back in the
-  queue, because the rule pass runs on every embed. That is how a newsletter the owner values
-  stays searchable by meaning: one `keep <domain>` line.
-- Below 0.8 the mail stays unplaced. The guess and its probability are stored beside it
-  (`jev_class`, `jev_prob`), and `set_by` says who set a class (`rule` or `jev`).
-- The model is reached through a client outside this repository
-  (`~/.claude/hooks/decision_client.py`, or the file `MANNAMINNE_DECISION_CLIENT` names).
-  Without it the step does nothing. `MANNAMINNE_MAIL_JUDGE=0` switches it off.
-- Its errors lean the safe way: a newsletter signed with a first name is sometimes called a
-  person, which only keeps it in the queue.
-
-Lists that describe one person's mail live beside it in `~/.config/mannaminne/`, never in this
-repository (the query sets in `eval/` there follow the same rule): `inbox_protect_labels.txt` (senders whose mail is never proposed for deletion, one
-domain label per line), `inbox_bulk_labels.txt`, `own_addresses.txt`. The two inbox tools
-refuse to run without a protect list: an empty one would look exactly like one that works.
-
-Chunks overlap by `CHUNK_OVERLAP` characters, so a message is rebuilt with
-`corpus_mail.join_chunks()`, never by joining its chunks whole. Output that describes a real
-mailbox is personal data and is written outside the repo, to `~/.cache/mannaminne/inbox/`.
