@@ -2255,6 +2255,15 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
             qe = _vec(_embed_batch([_embed_query_text(q)], for_query=True)[0])
             try:
                 cur.execute(f"SET LOCAL hnsw.ef_search = {HNSW_EF_SEARCH}")
+                # A scoped search filters the HNSW candidates AFTER the index walk, so
+                # when the scope is a small share of the corpus most of the ef_search
+                # candidates are thrown away (measured 2026-10-16: a doc-scoped query
+                # kept 55 of 100, with docs ~5 % of 2.35 M chunks). pgvector 0.8's
+                # iterative scan keeps walking until the LIMIT is met. On the prior-art
+                # set it turned the one miss into a rank-1 hit (recall 0.92 -> 1.00,
+                # MRR 0.53 -> 0.60). Unscoped searches need no filter and skip it.
+                if where_scope:
+                    cur.execute("SET LOCAL hnsw.iterative_scan = relaxed_order")
             except Exception:
                 pass
             cur.execute(
