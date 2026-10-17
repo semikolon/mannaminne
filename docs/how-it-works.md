@@ -64,6 +64,9 @@ scope has no embeddings yet, the search says how much.
   ran on a handful of rows. Two tests now run against the live index: a Swedish word must match,
   and a long Swedish query must stay under a time limit. Capping the candidate set took that
   query from about 50 seconds to under two.
+- **It only forgets what it has proved is gone.** A nightly run deletes chunks it did not see, so
+  a skipped file counts as seen, a source on an unplugged disk raises an error instead of looking
+  empty, and mail is never deleted.
 - **A snippet is what the reader decides from.** The first 200 characters of a chunk often had
   nothing to do with why it matched. Snippets are now centred on the match, at the same cost.
 - **Newer wins on the project record, not in life.** For documents, sessions, commits and code, a
