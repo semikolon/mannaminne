@@ -109,16 +109,35 @@ def is_bulk_label(name, patterns):
 
 
 def user_labels():
-    out = subprocess.run(["gws", "gmail", "users", "labels", "list", "--params",
-                          json.dumps({"userId": "me"})], capture_output=True, text=True,
-                         timeout=60).stdout
+    # An error answer has no "labels" key; reading it as "no labels" would strip
+    # the protection his own labels give, so it raises instead.
+    p = subprocess.run(["gws", "gmail", "users", "labels", "list", "--params",
+                        json.dumps({"userId": "me"})], capture_output=True, text=True,
+                       timeout=60)
+    out = p.stdout
     d = json.loads(out[out.index("{"):])
-    return {l["id"]: l["name"] for l in d.get("labels", []) if l.get("type") == "user"}
+    if p.returncode != 0 or "labels" not in d:
+        raise RuntimeError(f"gws labels list failed: {(out + p.stderr)[-300:]}")
+    return {l["id"]: l["name"] for l in d["labels"] if l.get("type") == "user"}
 
 
-def _gws(args, timeout=900):
-    out = subprocess.run(["gws", *args], capture_output=True, text=True, timeout=timeout)
-    return [l for l in out.stdout.splitlines() if l.startswith("{")]
+def _gws(args, timeout=900, attempts=6, sleep=time.sleep):
+    """The JSON lines of one paginated gws call, all of them or an exception.
+
+    A failed page must never pass for the end of the list. Until 2026-10-17 a
+    rate-limited page simply ended the listing, so a protect list (starred,
+    sent, his labels) could come back short and a message it missed would look
+    unprotected to the sweep. gws exits non-zero on an API error; retry the
+    whole listing, and give up loudly rather than return part of it."""
+    out = None
+    for attempt in range(attempts):
+        out = subprocess.run(["gws", *args], capture_output=True, text=True, timeout=timeout)
+        lines = [l for l in out.stdout.splitlines() if l.startswith("{")]
+        if out.returncode == 0 and not any('"error"' in l for l in lines):
+            return lines
+        sleep(min(60, 5 * 2 ** attempt))
+    tail = (out.stdout + out.stderr)[-300:] if out is not None else ""
+    raise RuntimeError(f"gws {' '.join(args[:4])} failed {attempts} times: {tail}")
 
 
 def list_ids(key, *, q=None, label=None, fresh=False):
