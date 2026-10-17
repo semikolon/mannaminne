@@ -67,6 +67,10 @@ scope has no embeddings yet, the search says how much.
 - **It only forgets what it has proved is gone.** A nightly run deletes chunks it did not see, so
   a skipped file counts as seen, a source on an unplugged disk raises an error instead of looking
   empty, and mail is never deleted.
+- **When unsure, keep.** Mail no rule places is sorted by a small model that sees only sender and
+  subject. Written rules always win, and mail the model is less than 80 % sure about stays
+  unsorted. The cleanup tools refuse to run without the list of senders to protect: if that list
+  were empty by mistake, every mail would look unprotected and nothing would say so.
 - **A snippet is what the reader decides from.** The first 200 characters of a chunk often had
   nothing to do with why it matched. Snippets are now centred on the match, at the same cost.
 - **Newer wins on the project record, not in life.** For documents, sessions, commits and code, a
