@@ -8,16 +8,19 @@ search and semantic search combined in Postgres, with embeddings computed on my 
 
 ## Why it exists
 
-I build most of my software together with AI coding agents. Every session starts with no memory
-of the one before, while the answers to the questions that matter most (*was this tried before?
-what did we decide, and why? where did I write about this?*) already sit somewhere in years of
-documents, commits, conversations and mail. Grep finds a passage if you guess its exact words.
-mannaminne finds it when you only remember what it was about, in Swedish or in English, and
-answers in a few seconds.
+I run most of my life through AI agents, mainly Claude Code and sometimes Codex. Software is one
+part of it. The rest is everything else: planning a move and deciding what to keep, job
+applications and letters, money and paperwork, and long conversations about concepts, ideas and
+philosophy for idea-heavy projects such as Deliberus. Every session starts with no memory of the
+one before, while what matters is already written down somewhere in years of notes, documents,
+mail, messages and code.
 
-I and my agents use it the same way, as a command-line tool. The agents' standing instructions
-tell them to search it before they claim that something is new, was never tried, or does not
-exist.
+mannaminne lets an agent, or me, find it by what it was about rather than by guessing its exact
+words, in Swedish or in English, in a second or two. That is why it holds mail and messages as
+well as code. Before an agent writes a letter in my name it can check what was actually said,
+before it gives advice it can find what I already decided, and before it calls an idea new it
+can see whether it was tried. The agents' standing instructions tell them to search before they
+claim that something is new, was never tried, or does not exist.
 
 ## What it indexes
 
@@ -39,74 +42,29 @@ it was about 2.35 million chunks, four fifths of them mail.
 
 ## How it works
 
-```
-sources ─► discover ─► chunk ─► Postgres: one table ─► search
-                                  ├─ text + tsvector        (keyword)
-                                  └─ pgvector, HNSW index   (meaning)
-                                        ▲
-                        embed on a local GPU
-```
+- **Ingest** runs every night. It reads each source, cuts the text into passages of about a
+  paragraph, and stores them in one Postgres table. Only what changed since the last run is read
+  again, and code is cut along functions and classes rather than at a fixed length.
+- **Embed** turns each passage into a vector on a GPU in a home server. Nothing is sent to a
+  cloud service.
+- **Search** runs a keyword search and a search by meaning side by side and merges the two lists,
+  so an exact name and a vague description both find their passage. Each hit shows the lines
+  around the match, its date and where it came from.
 
-**Ingest.** Each source has a small discoverer that yields documents. A document is cut into
-chunks of about 750 characters that overlap by 80, so a phrase on a boundary is still found.
-Markdown is cut at its headings. Code is cut along its syntax tree with tree-sitter, using the
-cAST method: small sibling nodes are merged and large ones split, so a function that fits stays
-whole, and each chunk starts with its file path and symbol name so the vector knows where it
-came from. A commit message is one chunk. Every chunk carries a hash of its text, so a re-run
-rewrites only what changed and re-embeds only that. A file whose size and modification time are
-unchanged is not read at all.
+## Design choices
 
-**Store.** One `chunks` table in Postgres 16 with pgvector. A generated `tsvector` column and a
-trigram index serve keyword search, and an HNSW index over 1024-dimensional vectors serves
-semantic search. The text, its keyword index and its vector live in the same row, so a hybrid
-query needs one database and nothing to keep in sync.
+- **Keyword search always works, meaning is added on top.** A new passage can be found by its
+  words at once, before any GPU time is spent on it.
+- **One database for both kinds of search,** so there is nothing to keep in sync, and it holds
+  millions of passages.
+- **Swedish and English both work.** Swedish compound words are matched by their beginnings, so
+  *möte* also finds *mötesprotokoll*.
+- **Newer wins in project notes, not in life.** A newer note outranks an older one on the same
+  topic, while old mail and messages are never pushed down for their age.
+- **It is measured.** `mannaminne eval` reports how often the right answer comes first on fixed
+  sets of questions, and changes are checked against it.
 
-**Embed.** Qwen3-Embedding-4B, served through llama.cpp's OpenAI-compatible endpoint from a
-GTX 1650 in a home server. Large backfills run on a borrowed workstation GPU when its owner is
-not using it (`z4/`). Nothing is sent to a cloud service. A query gets an instruction prefix;
-stored chunks are embedded as plain text. A chunk too dense for the server's context window is
-truncated and retried rather than dropped, and a batch that fails is split until the one bad
-item is isolated.
-
-**Search.** Keyword passes run first: an exact-phrase match for short queries, a search on all
-the terms, and a small probe per term. A vector search runs beside them. The ranked lists are
-merged with reciprocal rank fusion and de-duplicated per document, so one long conversation
-cannot fill the page. Each hit shows a snippet centred on the match. When part of the searched
-scope has no embeddings yet, the search says how much.
-
-## Design choices, and what they taught
-
-- **Keyword search is the guarantee, meaning is the bonus.** The requirement was to find any
-  needle in the haystack. Full-text search finds it the moment a chunk is ingested, before any
-  GPU time is spent, and semantic search fills in as the vectors arrive. That is how the index
-  grew to millions of chunks on a small GPU without ever being blind.
-- **Postgres instead of a separate vector database.** The first version, a small Rust tool from
-  March 2026 (`src/`), kept its index in memory and embedded only the first 800 or so characters
-  of each item. The rebuild on Postgres in June gave full coverage, one store for both kinds of
-  search, and an index that does not have to fit in memory.
-- **Swedish needs its own care.** About half the archive is Swedish. The keyword index uses
-  Postgres' `simple` configuration, without stemming: the Swedish stemmer joined one of four real
-  word pairs it was tested on and mangled the English half of the corpus (*files* became *fil*).
-  Swedish builds meaning by compounding (*möte*, *mötesprotokoll*), so terms of four letters or
-  more are also matched as prefixes, which doubled the hits for a word like *möte*.
-- **Test against the real index, not only against fixtures.** An early tokenizer pattern quietly
-  split every word containing å, ä or ö, and ranking every match of a common word made long
-  queries take close to a minute. Both passed the unit tests, which were written in English and
-  ran on a handful of rows. Two tests now run against the live index: a Swedish word must match,
-  and a long Swedish query must stay under a time limit. Capping the candidate set took that
-  query from about 50 seconds to under two.
-- **A snippet is what the reader decides from.** The first 200 characters of a chunk often had
-  nothing to do with why it matched. Snippets are now centred on the match, at the same cost.
-- **Newer wins on the project record, not in life.** For documents, sessions, commits and code, a
-  small recency term lets a newer note outrank an older one on the same topic that it replaced.
-  Mail and messages get no such term; a letter from 2012 should stay as findable as one from
-  last week.
-- **Measure before adding cleverness.** A reranker, GraphRAG and query rewriting were each weighed
-  against published results and against this corpus. Query rewriting hurts retrieval when the
-  query already uses the corpus's own words, and it costs a model call before every search.
-  GraphRAG suits corpora with a few clear kinds of entity, and sixteen years of mail, chat and
-  code has no such shape. A reranker is worth adding once a Swedish evaluation set can say which
-  one, and `mannaminne eval` exists for that.
+The details, and what each choice taught along the way: [`docs/how-it-works.md`](docs/how-it-works.md).
 
 ## Usage
 
