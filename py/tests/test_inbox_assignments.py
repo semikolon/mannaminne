@@ -78,6 +78,19 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(ads[iam]["also"], "Warsaw (POL) + more")
         self.assertFalse(ads[entra]["remote"])
 
+    def test_a_removed_ad_reads_as_closed_not_unreachable(self):
+        import email.message
+        import urllib.error
+        from unittest import mock
+        url = "https://career.deploja.se/jobs/8499884-tech-lead"   # answered 410 on 2026-10-17
+        gone = urllib.error.HTTPError(url, 410, "Gone", email.message.Message(), None)
+        with mock.patch("urllib.request.urlopen", side_effect=gone):
+            self.assertEqual(ia.check_deploja(url), (False, "", ""))
+        with mock.patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(url, 503, "x", email.message.Message(), None)):
+            self.assertIsNone(ia.check_deploja(url))
+        with mock.patch("urllib.request.urlopen", side_effect=TimeoutError()):
+            self.assertIsNone(ia.check_deploja(url))
+
     def test_chunks_are_joined_without_the_repeated_overlap(self):
         whole = "".join(chr(97 + i % 26) for i in range(1500))
         step = 750 - ia.CHUNK_OVERLAP

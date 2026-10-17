@@ -20,6 +20,7 @@ import html
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from collections import OrderedDict
 from datetime import date, timedelta
@@ -111,6 +112,10 @@ def check_deploja(url):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         page = urllib.request.urlopen(req, timeout=25).read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        # A removed ad answers 410 Gone (15 of 27 in the two weeks to 2026-10-17); reading
+        # that as "unreachable" kept dead ads in the list as if they might be open.
+        return (False, "", "") if e.code in (404, 410) else None
     except Exception:
         return None
     body = re.sub(r"<script.*?</script>|<style.*?</style>", "", page, flags=re.S)
@@ -124,13 +129,66 @@ def check_deploja(url):
             f"{place.group(1).strip()}, {place.group(2)}" if place else "")
 
 
+def collect(cur, since, want, check=False):
+    """Every matching assignment since `since`, one dict each: source, posted, title, url,
+    key (stable across runs), and for Deploja with `check` the page's state, deadline and
+    place. Brainville lists carry no titles, so their entries are windows of text."""
+    out = []
+    dep = OrderedDict()
+    for created, text in mails(cur, DEPLOJA, since):
+        for title, url in parse_deploja(text):
+            dep.setdefault(url, (created, title))
+    for url, (created, title) in dep.items():
+        if not want.search(title):
+            continue
+        item = {"source": "Deploja", "posted": created, "title": title, "url": url, "key": url,
+                "state": "unchecked", "deadline": "", "place": ""}
+        if check:
+            r = check_deploja(url)
+            if r is None:
+                item["state"] = "unreachable"
+            elif not r[0]:
+                item["state"] = "closed"
+            else:
+                item.update(state="open", deadline=r[1], place=r[2])
+        out.append(item)
+    ew = OrderedDict()
+    for created, text in mails(cur, EWORK, since):
+        for ad in parse_ework(text):
+            ew.setdefault(ad["ad"], (created, ad))
+    for text, (created, ad) in ew.items():
+        if want.search(text):
+            out.append({"source": "Ework", "posted": created, "title": text, "url": "",
+                        "key": "ework:" + text, "state": "behind login", "deadline": "",
+                        "place": "", "rate": ad["rate"], "remote": ad["remote"],
+                        "also": ad["also"]})
+    seen = set()
+    for created, text in mails(cur, BRAINVILLE, since):
+        for m in want.finditer(text):
+            window = text[max(0, m.start() - 60):m.end() + 110].strip()
+            key = window[40:110]
+            if key not in seen:
+                seen.add(key)
+                out.append({"source": "Brainville", "posted": created, "title": f"…{window}…",
+                            "url": "", "key": "brainville:" + key, "state": "behind login",
+                            "deadline": "", "place": ""})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since", default=str(date.today() - timedelta(days=28)))
     ap.add_argument("--check", action="store_true", help="fetch public ads: still open?")
+    ap.add_argument("--json", action="store_true",
+                    help="one JSON list of the matching assignments, for job-watch and other tools")
     args = ap.parse_args()
     want = profile()
     cur = load_conn().cursor()
+
+    if args.json:
+        import json
+        print(json.dumps(collect(cur, args.since, want, args.check), ensure_ascii=False, indent=1))
+        return
 
     dep = OrderedDict()
     for created, text in mails(cur, DEPLOJA, args.since):
