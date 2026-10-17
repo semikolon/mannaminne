@@ -56,7 +56,8 @@ it was about 2.35 million chunks, four fifths of them mail.
 - **Keyword search always works, meaning is added on top.** A new passage can be found by its
   words at once, before any GPU time is spent on it.
 - **One database for both kinds of search,** so there is nothing to keep in sync, and it holds
-  millions of passages.
+  millions of passages. Mail, four fifths of them, sits in its own part, so ordinary searches stay
+  in memory.
 - **Swedish and English both work.** Swedish compound words are matched by their beginnings, so
   *möte* also finds *mötesprotokoll*.
 - **Newer wins in project notes, not in life.** A newer note outranks an older one on the same
@@ -69,7 +70,9 @@ The details, and what each choice taught along the way: [`docs/how-it-works.md`]
 ## Usage
 
 ```bash
-mannaminne "when did we decide to drop the MCP server"    # search everything
+mannaminne "when did we decide to drop the MCP server"    # everything except mail
+mannaminne -e "the lease we signed in 2019"                # mail only
+mannaminne -A "the lease we signed in 2019"                # everything, mail included
 mannaminne -d "chunk size for code"                        # documents only
 mannaminne -c -g "retry logic" -P myrepo                   # code and commits in one repository
 mannaminne -k "an exact phrase"                            # keyword layers only, no GPU
@@ -78,6 +81,10 @@ mannaminne eval                                            # recall, MRR and lat
 mannaminne ingest                                          # discover, chunk and upsert all sources
 mannaminne embed --limit 500                               # fill missing embeddings
 ```
+
+A plain search leaves mail out. Mail is four fifths of the rows and is kept in its own part of the
+table, so leaving it out keeps a search in the part that fits in memory; `-e` searches mail and
+`-A` (also `--all`) searches everything.
 
 Source flags narrow a search to one or more kinds: `-s` sessions, `-d` docs, `-m` Messenger,
 `-a` AI chats, `--note`, `-e` email, `-t` Things 3, `-f` Fyr, `-p` screenshots, `-g` commits,

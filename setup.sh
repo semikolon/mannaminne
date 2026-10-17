@@ -52,18 +52,26 @@ ssh darwin 'until docker exec mannaminne-postgres pg_isready -U postgres >/dev/n
 docker exec -i mannaminne-postgres psql -U postgres -d mannaminne' <<'SQL'
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- Split by source kind: mail in one partition, everything else in the other, each with its
+-- own indexes, so a plain search (which leaves mail out) reads only the smaller part.
+-- A database created before 2026-10-17 has one unsplit table: migrations/split_mail.sql
+-- builds the split beside it.
 CREATE TABLE IF NOT EXISTS chunks (
-  id TEXT PRIMARY KEY, source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
+  id TEXT NOT NULL, source_kind TEXT NOT NULL, source_id TEXT NOT NULL,
   chunk_idx INT NOT NULL, project TEXT, title TEXT, text TEXT NOT NULL,
-  created TEXT, updated TEXT, content_hash TEXT NOT NULL, embedding vector(1024),
-  tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(title,'') || ' ' || text)) STORED
-);
--- Migration for pre-existing DBs (created before the created/updated split):
-ALTER TABLE chunks ADD COLUMN IF NOT EXISTS updated TEXT;
+  created TEXT, content_hash TEXT NOT NULL, embedding vector(1024),
+  tsv tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(title,'') || ' ' || text)) STORED,
+  updated TEXT, embed_priority SMALLINT,
+  CONSTRAINT chunks_pkey PRIMARY KEY (id, source_kind)
+) PARTITION BY LIST (source_kind);
+CREATE TABLE IF NOT EXISTS chunks_mail PARTITION OF chunks FOR VALUES IN ('email');
+CREATE TABLE IF NOT EXISTS chunks_rest PARTITION OF chunks DEFAULT;
 CREATE INDEX IF NOT EXISTS chunks_tsv_gin  ON chunks USING gin(tsv);
 CREATE INDEX IF NOT EXISTS chunks_trgm_gin ON chunks USING gin(text gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS chunks_kind     ON chunks(source_kind);
 CREATE INDEX IF NOT EXISTS chunks_src      ON chunks(source_id);
+CREATE INDEX IF NOT EXISTS chunks_embed_queue ON chunks(embed_priority) WHERE embedding IS NULL;
+-- The vector index (half precision) is made by `mannaminne embed` once vectors exist.
 SQL
 
 echo "[mannaminne setup] done. Next: 'mannaminne ingest' then 'mannaminne embed'."

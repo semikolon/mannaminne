@@ -57,7 +57,7 @@ class CoverageNotice(unittest.TestCase):
                 mock.patch.object(m, "_embedding_coverage", return_value=[("doc", 9702, 22675)]) as count, \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             m.cmd_search(search_args())
-        count.assert_called_once_with(["doc"], ["deliberus"])
+        count.assert_called_once_with(["doc"], ["deliberus"], None)
         self.assertEqual(out.getvalue(), "")
         self.assertIn("doc 9,702 of 22,675 (43%)", err.getvalue())
 

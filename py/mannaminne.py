@@ -1571,7 +1571,7 @@ def _upsert(cur, rows):
     cur.executemany(
         """INSERT INTO chunks (id,source_kind,source_id,chunk_idx,project,title,text,created,updated,content_hash)
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-           ON CONFLICT (id) DO UPDATE SET
+           ON CONFLICT (id, source_kind) DO UPDATE SET
              text=EXCLUDED.text, title=EXCLUDED.title, project=EXCLUDED.project,
              created=EXCLUDED.created, updated=EXCLUDED.updated,
              embedding = CASE WHEN chunks.content_hash <> EXCLUDED.content_hash
@@ -2034,9 +2034,9 @@ def cmd_embed(args):
     # build HNSW once vectors exist (idempotent)
     cur.execute("SELECT count(*) FROM chunks WHERE embedding IS NOT NULL")
     if cur.fetchone()[0] > 0:
-        print("ensuring HNSW index exists (cosine)...", flush=True)
-        cur.execute("CREATE INDEX IF NOT EXISTS chunks_emb_hnsw ON chunks "
-                    "USING hnsw (embedding vector_cosine_ops)")
+        print("ensuring HNSW index exists (cosine, half precision)...", flush=True)
+        cur.execute(f"CREATE INDEX IF NOT EXISTS chunks_emb_hnsw ON chunks "
+                    f"USING hnsw (({HALFVEC_ORDER}) halfvec_cosine_ops)")
         conn.commit()
     print("embed done.", flush=True)
 
@@ -2113,6 +2113,19 @@ SOFT_PREFIX_MIN_CHARS = _env_int("MANNAMINNE_SOFT_PREFIX_MIN_CHARS", 4)
 #: 1.5 s with recall and rank unchanged. Skipping very common soft terms was
 #: tried the same evening and dropped: it saved another 0.5 s but lost a hit.
 SEARCH_WORK_MEM = os.environ.get("MANNAMINNE_SEARCH_WORK_MEM", "64MB")
+
+#: A plain search leaves mail out; `-e` searches mail and `-A/--all` searches everything.
+#: Mail is four fifths of the rows. Since 2026-10-17 `chunks` is split by source kind into
+#: `chunks_mail` and `chunks_rest`, each with its own indexes, so a search that excludes mail
+#: reads only the smaller part, which fits in Darwin's memory. Measured before the split:
+#: leaving mail out changed no hit on the three eval sets. Written as an exclusion, not a list
+#: of kinds, so a source kind added later is searched by default without anyone remembering it.
+DEFAULT_EXCLUDED_KINDS = ("email",)
+
+#: The vector index stores half-precision copies (`embedding::halfvec`), about half the size;
+#: the column itself stays full precision. The search orders by this exact expression so the
+#: index is used, and scores the returned rows at full precision.
+HALFVEC_ORDER = f"embedding::halfvec({EMBED_DIM})"
 
 def _soft_tsquery(term: str) -> str:
     """Prefix-expand a soft term when it is long enough to be discriminating."""
@@ -2248,7 +2261,8 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
             _add_keyword_result(results, r, rank, weight=0.35)
     return results
 
-def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, conn=None):
+def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, conn=None,
+                   exclude=None):
     owned = conn is None
     conn = conn or load_conn()
     cur = conn.cursor()
@@ -2265,6 +2279,10 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
     if scope:
         where_parts.append(" AND source_kind = ANY(%s)")
         params_scope.append(scope)
+    if exclude:
+        # Postgres skips the excluded partition outright for this form (checked with EXPLAIN).
+        where_parts.append(" AND source_kind <> ALL(%s)")
+        params_scope.append(list(exclude))
     if projects:
         where_parts.append(" AND project = ANY(%s)")
         params_scope.append(projects)
@@ -2293,7 +2311,7 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
                 f"""SELECT id,source_kind,project,title,{SNIPPET_SQL},created,
                            1-(embedding<=>%s::vector) AS sem,updated FROM chunks
                     WHERE embedding IS NOT NULL{where_scope}
-                    ORDER BY embedding<=>%s::vector LIMIT %s""",
+                    ORDER BY {HALFVEC_ORDER}<=>%s::halfvec({EMBED_DIM}) LIMIT %s""",
                 [q, qe, *params_scope, qe, SEARCH_SEMANTIC_LIMIT])
             for rank, r in enumerate(cur.fetchall(), 1):
                 rid = r[0]
@@ -2310,11 +2328,14 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
         conn.close()
     return ranked
 
-def _coverage_sql(scope, projects):
+def _coverage_sql(scope, projects, exclude=None):
     where, params = [], []
     if scope:
         where.append("source_kind = ANY(%s)")
         params.append(list(scope))
+    if exclude:
+        where.append("source_kind <> ALL(%s)")
+        params.append(list(exclude))
     if projects:
         where.append("project = ANY(%s)")
         params.append(list(projects))
@@ -2322,10 +2343,10 @@ def _coverage_sql(scope, projects):
            + (" WHERE " + " AND ".join(where) if where else "") + " GROUP BY 1")
     return sql, params
 
-def _embedding_coverage(scope, projects):
+def _embedding_coverage(scope, projects, exclude=None):
     """Per source kind: (kind, chunks with no embedding, chunks), for exactly what a search covers.
     Its own connection, so it can run beside the search. Counted live: nothing is cached."""
-    sql, params = _coverage_sql(scope, projects)
+    sql, params = _coverage_sql(scope, projects, exclude)
     conn = load_conn()
     try:
         cur = conn.cursor()
@@ -2354,6 +2375,7 @@ def _coverage_notice(rows=None, error=None, late=False):
 def cmd_search(args):
     q = " ".join(args.query)
     scope = _scope(args)
+    exclude = _exclude(args, scope)
     projects = _project_scope(args)
     cover, counter = {}, None
     if not args.keyword:
@@ -2361,13 +2383,13 @@ def cmd_search(args):
 
         def _count():
             try:
-                cover["rows"] = _embedding_coverage(scope, projects)
+                cover["rows"] = _embedding_coverage(scope, projects, exclude)
             except Exception as e:  # the notice must never break a search, and never stay quiet either
                 cover["error"] = str(e)[:120]
         counter = threading.Thread(target=_count, daemon=True)
         counter.start()
     ranked = search_results(q, scope=scope, projects=projects,
-                            keyword=args.keyword, limit=args.limit)
+                            keyword=args.keyword, limit=args.limit, exclude=exclude)
     if counter:
         counter.join(timeout=2.5)
         note = _coverage_notice(cover.get("rows"), cover.get("error"), late=counter.is_alive())
@@ -2420,6 +2442,13 @@ def _case_scope(case):
     if isinstance(scope, list):
         return scope
     return None
+
+def _case_exclude(case):
+    """An eval case searches what a plain `mannaminne "<query>"` searches, unless it says otherwise:
+    a named scope, or `"all": true` for every source."""
+    if _case_scope(case) or case.get("all"):
+        return None
+    return list(DEFAULT_EXCLUDED_KINDS)
 
 def _case_projects(case):
     proj = case.get("project") or case.get("repo")
@@ -2502,7 +2531,8 @@ def cmd_eval(args):
         expectations = _case_expectations(case)
         t0 = time.perf_counter()
         ranked = search_results(q, scope=_case_scope(case), projects=_case_projects(case),
-                                keyword=args.keyword, limit=args.k, conn=conn)
+                                keyword=args.keyword, limit=args.k, conn=conn,
+                                exclude=_case_exclude(case))
         latency_ms = (time.perf_counter() - t0) * 1000
         latencies.append(latency_ms)
         # The result rows carry only left(text,200), so a topic word deeper in the
@@ -2567,7 +2597,13 @@ def _scope(args):
     invoked = os.environ.get("MANNAMINNE_INVOKED_AS") or os.path.basename(sys.argv[0])
     if invoked == "ccsearch":
         return ["session", "doc", "git_commit", "code"]   # ccsearch alias → code-project sources
-    return None                     # mannaminne / minne → all sources
+    return None                     # mannaminne / minne → every source but mail, see _exclude
+
+def _exclude(args, scope):
+    """Kinds a search leaves out: mail, unless a kind was named or `--all` was given."""
+    if scope or getattr(args, "all", False):
+        return None
+    return list(DEFAULT_EXCLUDED_KINDS)
 
 def _project_scope(args):
     """Hard project/repo filter (WHERE project = ANY). `--project brf-auto` or
@@ -2584,7 +2620,10 @@ def _add_search_args(sp):
     sp.add_argument("-m", "--messenger", action="store_true")
     sp.add_argument("-a", "--aichat", action="store_true")
     sp.add_argument("--note", action="store_true")
-    sp.add_argument("-e", "--email", action="store_true")
+    sp.add_argument("-e", "--email", action="store_true",
+                    help="search mail (a plain search leaves mail out)")
+    sp.add_argument("-A", "--all", action="store_true",
+                    help="search every source, mail included (slower: mail is read from disk)")
     sp.add_argument("-t", "--things3", action="store_true")
     sp.add_argument("-f", "--fyr", action="store_true")
     sp.add_argument("-p", "--photos", dest="screenshot", action="store_true")
