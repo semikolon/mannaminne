@@ -71,6 +71,9 @@ scope has no embeddings yet, the search says how much.
   subject. Written rules always win, and mail the model is less than 80 % sure about stays
   unsorted. The cleanup tools refuse to run without the list of senders to protect: if that list
   were empty by mistake, every mail would look unprotected and nothing would say so.
+- **A pause must not starve what is used daily.** Embedding the mail backlog was paused to spare the
+  home server, and for a month the pause also stopped new notes and code from being embedded.
+  Notes, code and chosen projects are now embedded every night regardless.
 - **A snippet is what the reader decides from.** The first 200 characters of a chunk often had
   nothing to do with why it matched. Snippets are now centred on the match, at the same cost.
 - **Newer wins on the project record, not in life.** For documents, sessions, commits and code, a
