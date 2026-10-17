@@ -804,6 +804,11 @@ def _email_body(msg) -> str:
 
 #: Live Gmail, the other half of the email source.
 #:
+#: Corrected 2026-10-17: the 2014 Takeout below is the ApoEx WORK account, not the
+#: personal Gmail, so the floor that starts the live half at 2014-09-04 left the
+#: personal mailbox before that date out of both halves. `gmail_sweep.py
+#: index-missing` closes it for swept mail; the rest needs a one-off backfill.
+#:
 #: The mbox archives stop at **Sept 2014** (a Takeout taken then), so everything
 #: since was unsearchable — a twelve-year hole in the middle of the corpus, and
 #: the single largest gap in it. The design doc named the two ways to close it

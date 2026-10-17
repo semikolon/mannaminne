@@ -3,7 +3,7 @@
 
 `inbox_inventory.py` ranks SENDER DOMAINS and reads them from the corpus. Two
 things made that the wrong instrument for the deletion decision: the corpus is
-not the account (it also holds a 4.7 GB offline archive), and a sender is one
+not the account (it also holds a 4.7 GB offline archive of a work mailbox), and a sender is one
 variable. This reads the messages that are actually in the Gmail account and
 describes each one by several independent signals at once, weighted by the
 bytes it occupies, because bytes are what the quota counts.
