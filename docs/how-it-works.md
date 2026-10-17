@@ -6,7 +6,7 @@ what it taught. Moved out of the README on 2026-10-17.*
 ## The pipeline
 
 ```
-sources ─► discover ─► chunk ─► Postgres: one table ─► search
+sources ─► discover ─► chunk ─► Postgres: one table, mail in its own part ─► search
                                   ├─ text + tsvector        (keyword)
                                   └─ pgvector, HNSW index   (meaning)
                                         ▲
@@ -22,7 +22,10 @@ came from. A commit message is one chunk. Every chunk carries a hash of its text
 rewrites only what changed and re-embeds only that. A file whose size and modification time are
 unchanged is not read at all.
 
-**Store.** One `chunks` table in Postgres 16 with pgvector. A generated `tsvector` column and a
+**Store.** One `chunks` table in Postgres 16 with pgvector, partitioned by source: mail, four
+fifths of the rows, sits in `chunks_mail` and everything else in `chunks_rest`, each with its own
+indexes. A plain search leaves mail out (`-e` searches mail only, `-A` everything), so it walks a
+part small enough to stay in memory. A generated `tsvector` column and a
 trigram index serve keyword search, and an HNSW index over 1024-dimensional vectors serves
 semantic search. The text, its keyword index and its vector live in the same row, so a hybrid
 query needs one database and nothing to keep in sync.
@@ -92,3 +95,12 @@ often read from disk, and the same query could take one second or nine. Measured
   evaluation missed was found again.
 - **Tried and dropped:** skipping very common words entirely, judged by the planner's own row
   estimates. It saved another half second and lost a correct answer.
+- **Mail moved into its own part of the table (2026-10-17).** Four rows in five were mail, and most
+  searches are not about mail, so every search paid to walk an index mostly made of it. The table is
+  now partitioned by source, a plain search reads only the non-mail part, and the vector index stores
+  half-precision vectors (an expression index over `halfvec(1024)`; scores are still computed at full
+  precision). Rebuilt beside the old table and swapped in once the row and vector counts matched
+  (2,354,748 rows). Same answers on all three evaluation sets; the prior-art set fell from 8.9 s to
+  2.6 s on average and the main set from 4.9 s to 3.4 s. Building the vector index inside the
+  container needs `max_parallel_maintenance_workers = 0`, because Docker's default 64 MB of shared
+  memory is too small for a parallel build.
