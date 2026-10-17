@@ -1032,6 +1032,14 @@ def _email_rows(raw, seen, fallback_epoch_ms=0):
 
 
 def discover_email():
+    # Mail is never pruned. A message missing this run was deleted from Gmail,
+    # sits in an archive that was not re-read, or sits on a drive that is not
+    # plugged in; none of these means it should leave the index, and the
+    # archive is what makes deleting from Gmail safe. Before 2026-10-17 email
+    # was marked partial only on the two paths below, so an unmounted FERMI or
+    # a changed archive file let the prune delete every message it had not
+    # just read.
+    _PARTIAL_KINDS.add("email")
     mbox_paths = [path for _label, path in MBOX_SOURCES]
     mbox_stale = True
     if GMAIL_LIVE:

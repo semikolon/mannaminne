@@ -603,6 +603,16 @@ class PartialKindPruneSafetyTests(unittest.TestCase):
         self.assertEqual(len(deletes), 1)
         self.assertEqual(deletes[0][1], (["doc"],), "email ran partially and must not be pruned")
 
+    def test_email_is_never_pruned_even_with_the_archive_unplugged(self):
+        # FERMI unmounted: the archive path is missing, the fingerprint differs,
+        # so the archive branch runs and reads nothing. The 140 000 archived
+        # messages must not then be pruned as orphans.
+        with mock.patch.object(m, "MBOX_SOURCES", [("gone", "/Volumes/NOT-MOUNTED/x.mbox")]), \
+             mock.patch.object(m, "GMAIL_LIVE", False), \
+             mock.patch.object(m, "_skip_if_unchanged", lambda kind, paths: None):
+            list(m.discover_email())
+        self.assertIn("email", m._PARTIAL_KINDS)
+
     def test_a_whole_kind_is_still_pruned(self):
         def whole_email():
             yield ("email:new#0", "email", "email:new", 0, "gmail", "S", "b", "2026-08-13", "2026-08-13", "hh")
