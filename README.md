@@ -32,6 +32,7 @@ claim that something is new, was never tried, or does not exist.
 | `note` | Simplenote |
 | `doc` | Markdown and text documents in project folders and notes |
 | `session` | Claude Code transcripts, with tool output and injected instructions filtered out |
+| `said` | only what I typed into Claude Code, from the transcripts and, where a transcript is gone, from Claude Code's prompt history |
 | `code` | source files from about forty repositories, chunked along the syntax tree |
 | `git_commit` | the commit messages of the same repositories |
 | `things3`, `fyr` | task lists |
@@ -88,7 +89,8 @@ table, so leaving it out keeps a search in the part that fits in memory; `-e` se
 
 Source flags narrow a search to one or more kinds: `-s` sessions, `-d` docs, `-m` Messenger,
 `-a` AI chats, `--note`, `-e` email, `-t` Things 3, `-f` Fyr, `-p` screenshots, `-g` commits,
-`-c` code. `-P` (also `--repo`) narrows to named projects; put it last, since it takes several
+`-c` code, `--said` what I typed in Claude Code (left out of a plain search, since the session
+rows hold the same words). `-P` (also `--repo`) narrows to named projects; put it last, since it takes several
 names. Invoked as `ccsearch`, the tool searches sessions, docs, commits and code by default.
 
 ## Running it yourself
