@@ -300,7 +300,9 @@ class SessionDiscoveryTests(unittest.TestCase):
             ]
             (d / "sid-1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
             os.environ["MANNAMINNE_SESSION_PATHS"] = live
-            rows = list(m.discover_said())
+            # Never the real prompt history: it holds 29,000 of his own lines.
+            with mock.patch.dict(os.environ, {"MANNAMINNE_PROMPT_HISTORY": str(Path(live) / "none.jsonl")}):
+                rows = list(m.discover_said())
             texts = [r[6] for r in rows]
             self.assertEqual(texts, ["Build it, the speaker filter",
                                      "Isn't this too abstract for Jev?"])

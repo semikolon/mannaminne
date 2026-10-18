@@ -745,6 +745,56 @@ _NOT_HIS = ("Another Claude session sent a message", "Base directory for this sk
             "# Specification Verification", "<side-sessions-event>", "[Request interrupted")
 
 
+#: Claude Code's own record of what he typed: one line per prompt with its text, project,
+#: time and, from late 2025, its session. The transcripts before about January 2026 are gone
+#: (Claude Code deleted them, `incident_cc_transcript_cleanup_2026-09-08.md`), but this file
+#: reaches back to 2025-09-29, so it fills `said` where no transcript survives (2026-10-18).
+PROMPT_HISTORY = os.environ.get("MANNAMINNE_PROMPT_HISTORY",
+                                os.path.join(HOME, ".claude/history.jsonl"))
+_PASTED = re.compile(r"\[(Pasted text|Image) #\d+[^\]]*\]")
+
+
+def _said_from_history(seen_sids, path=None):
+    """`said` rows for sessions whose transcript no longer exists, from the prompt history.
+    A session that still has a transcript is skipped, since the transcript holds everything.
+    Lines without a session (the oldest) are grouped per project and day. Pasted text is left
+    out: it is what he pasted, not what he wrote. Slash commands and terminal output pasted
+    into the prompt (it carries escape codes) are left out, as the transcripts leave them out."""
+    # Read at call time, so a test (or another machine) can point it elsewhere.
+    path = path or os.environ.get("MANNAMINNE_PROMPT_HISTORY", PROMPT_HISTORY)
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    groups = {}
+    with fh:
+        for line in fh:
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            t = _PASTED.sub("", o.get("display") or "").strip()
+            if (not t or t.startswith(("/", "<")) or "\x1b" in t or len(t) > 12000
+                    or any(m in t for m in _NOISE) or any(m in t for m in _NOT_HIS)):
+                continue
+            ts = o.get("timestamp") or 0
+            day = time.strftime("%Y-%m-%d", time.localtime(ts / 1000)) if ts else ""
+            # The project name the transcripts get: the folder path with "/" as "-", last part.
+            proj = (o.get("project") or "").replace("/", "-").rsplit("-", 1)[-1] or "unknown"
+            sid = o.get("sessionId") or f"h-{proj}-{day}"
+            if sid in seen_sids:
+                continue
+            groups.setdefault(sid, (proj, []))[1].append((day, t))
+    for sid, (proj, items) in groups.items():
+        source_id, k = f"said:{sid}", 0
+        for day, t in items:
+            title = t[:80].replace("\x00", "")
+            for _, ch in chunk(t):
+                ch = ch.replace("\x00", "")
+                yield (f"{source_id}#{k}", "said", source_id, k, proj, title, ch, day, day, h(ch))
+                k += 1
+
+
 def discover_said():
     """What Fredrik himself typed into Claude Code, one row per user message
     (built 2026-10-18, so a session can look up what he said about a thing before
@@ -809,6 +859,7 @@ def discover_said():
                             yield (f"{source_id}#{k}", "said", source_id, k, proj,
                                    title, ch, created, created, h(ch))
                             k += 1
+    yield from _said_from_history(seen_sids)
 
 
 # --- email (mbox: Gmail Takeout + curated subsets) --------------------------
