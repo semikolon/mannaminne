@@ -425,7 +425,7 @@ def backup_holds_copies(dest, count, run=subprocess.run):
     .eml files under `dest`. The copy is the only original once Gmail empties
     its trash, so it must sit on a second disk first."""
     script = (f'source "$HOME/.secrets/load-all.sh" >/dev/null 2>&1; '
-              f'"$HOME/.local/bin/restic" ls latest --json "{dest}/eml"')
+              f'"$HOME/.local/bin/restic" ls latest --recursive --json "{dest}/eml"')
     p = run(["zsh", "-c", script], capture_output=True, text=True, timeout=1800)
     if p.returncode != 0:
         return False, p.stderr[-200:]

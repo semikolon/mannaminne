@@ -233,6 +233,16 @@ class Trash(unittest.TestCase):
         self.assertTrue(gs.backup_holds_copies(Path("/x"), 2, run=run)[0])
         self.assertFalse(gs.backup_holds_copies(Path("/x"), 3, run=run)[0])
 
+    def test_the_backup_listing_is_recursive(self):
+        # Without --recursive, restic lists only the top folder and every copy reads as missing
+        # (found 2026-10-18: the gate waited on 0 of 71,113 copies the snapshot held).
+        seen = []
+        def run(argv, **kw):
+            seen.append(argv[-1])
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        gs.backup_holds_copies(Path("/x"), 1, run=run)
+        self.assertIn("ls latest --recursive", seen[0])
+
 
 class Check(unittest.TestCase):
     def test_a_copy_whose_index_id_is_absent_is_missing(self):
