@@ -558,7 +558,10 @@ def cmd_finish(args):
         if s["not_copied"] or s["damaged"]:
             return stopped(f"{s['not_copied']} okopierade och {s['damaged']} skadade kopior")
         if s["missing_from_index"]:
-            cmd_index_missing(args)
+            # In a fresh process: this run may have loaded the database code half a day
+            # ago, and a schema change since then (the 2026-10-17 table split) makes the
+            # old write statement fail. A new process reads the code as it is now.
+            subprocess.run([sys.executable, os.path.abspath(__file__), "index-missing"], check=True)
             with mannaminne.load_conn() as conn:
                 s = check(DEST, plan, conn, cited_index)
             print(json.dumps(s), flush=True)
