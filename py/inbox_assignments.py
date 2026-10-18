@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -34,6 +36,13 @@ PROFILE_FILE = os.path.expanduser("~/.config/mannaminne/assignment_profile.txt")
 DEPLOJA = "deplojaab.teamtailor-mail.com"
 EWORK = "eworkgroup.com"
 BRAINVILLE = "brainville.com"
+
+#: One listing in Brainville's daily mail: a link to the ad whose text is its title. The text
+#: copy in the corpus runs title, company, place and skills together with nothing between them,
+#: so the titles are read from the mail's HTML in Gmail instead (found 2026-10-18).
+BRAINVILLE_AD = re.compile(
+    r'<a[^>]+href="(https://www\.brainville\.com/Market/RequisitionSearchResult/Details/(\d+))'
+    r'[^"]*"[^>]*>(.*?)</a>', re.S)
 
 DEPLOJA_AD = re.compile(
     r"([A-ZÅÄÖ0-9.][^()<>]{2,90}?) \((https://career\.deploja\.se/jobs/[^)\s]+)\)")
@@ -129,10 +138,68 @@ def check_deploja(url):
             f"{place.group(1).strip()}, {place.group(2)}" if place else "")
 
 
-def collect(cur, since, want, check=False):
+def _flat(fragment):
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", fragment))).strip()
+
+
+def _about(text):
+    """Company, place and length, short: a hidden client is said plainly and the rest is cut."""
+    text = text.replace("Med Premium får du se kunden", "kund dold").strip()
+    return text if len(text) <= 90 else text[:90].rsplit(" ", 1)[0] + "…"
+
+
+def parse_brainville_html(page, created=""):
+    """The listings in one Brainville mail's HTML: id, url, title, `about` (company, place and
+    length as the mail writes them) and a deadline from its "om N days"."""
+    out = []
+    ms = list(BRAINVILLE_AD.finditer(page))
+    for i, m in enumerate(ms):
+        end = ms[i + 1].start() if i + 1 < len(ms) else m.end() + 3000
+        meta = _flat(page[m.end():end])
+        days = re.match(r"(.*?)\s*\bom (\d+) days?\b", meta)
+        deadline = ""
+        if days and created:
+            deadline = (date.fromisoformat(created) + timedelta(days=int(days.group(2)))).isoformat()
+        out.append({"id": m.group(2), "url": m.group(1), "title": _flat(m.group(3)),
+                    "about": _about(days.group(1) if days else meta), "deadline": deadline})
+    return out
+
+
+def _gws(args):
+    from mannaminne import _gws_bin
+    p = subprocess.run([_gws_bin(), *args], capture_output=True, text=True, timeout=120)
+    d = json.loads(p.stdout[p.stdout.index("{"):])
+    if p.returncode != 0 or "error" in d:
+        raise RuntimeError((p.stdout + p.stderr)[-200:])
+    return d
+
+
+def brainville_from_gmail(since):
+    """[(mail date, listing)] from the HTML of Brainville's daily mails since `since`, oldest
+    first, so a listing repeated in later mails keeps its first day."""
+    import base64
+    import email
+    from email import policy
+    q = f"from:noreply@brainville.com after:{since.replace('-', '/')}"
+    found = _gws(["gmail", "users", "messages", "list", "--params",
+                  json.dumps({"userId": "me", "q": q, "maxResults": 100})])
+    out = []
+    for m in reversed(found.get("messages", [])):
+        r = _gws(["gmail", "users", "messages", "get", "--params",
+                  json.dumps({"userId": "me", "id": m["id"], "format": "raw"})])
+        msg = email.message_from_bytes(base64.urlsafe_b64decode(r["raw"]), policy=policy.default)
+        body = msg.get_body(preferencelist=("html",))
+        created = date.fromtimestamp(int(r.get("internalDate", 0)) / 1000).isoformat()
+        if body is not None:
+            out += [(created, ad) for ad in parse_brainville_html(body.get_content(), created)]
+    return out
+
+
+def collect(cur, since, want, check=False, brainville=brainville_from_gmail):
     """Every matching assignment since `since`, one dict each: source, posted, title, url,
     key (stable across runs), and for Deploja with `check` the page's state, deadline and
-    place. Brainville lists carry no titles, so their entries are windows of text."""
+    place. Brainville's titles come from the mail's HTML in Gmail; when Gmail cannot be read
+    its entries fall back to windows of the corpus text, marked by a leading "…".""" 
     out = []
     dep = OrderedDict()
     for created, text in mails(cur, DEPLOJA, since):
@@ -162,7 +229,21 @@ def collect(cur, since, want, check=False):
                         "key": "ework:" + text, "state": "behind login", "deadline": "",
                         "place": "", "rate": ad["rate"], "remote": ad["remote"],
                         "also": ad["also"]})
+    try:
+        listings = brainville(since)
+    except Exception as e:  # Gmail unreachable: the text windows still say something
+        print(f"brainville: Gmail not readable ({str(e)[:120]}); using text windows", file=sys.stderr)
+        listings = None
     seen = set()
+    if listings is not None:
+        for created, ad in listings:
+            if ad["id"] in seen or not want.search(ad["title"]):
+                continue
+            seen.add(ad["id"])
+            out.append({"source": "Brainville", "posted": created, "title": ad["title"],
+                        "url": ad["url"], "key": "brainville:" + ad["id"], "state": "behind login",
+                        "deadline": ad["deadline"], "place": ad["about"]})
+        return out
     for created, text in mails(cur, BRAINVILLE, since):
         for m in want.finditer(text):
             window = text[max(0, m.start() - 60):m.end() + 110].strip()
