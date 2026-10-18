@@ -116,20 +116,39 @@ def class_for(choice, prob):
     return CLASS_OF[choice] if prob >= MIN_PROB else None
 
 
-def _load_key():
-    """A launchd job has no login shell, so the key may be missing from the
-    environment. Read into this process only, never printed."""
-    if os.environ.get("OPENROUTER_API_KEY"):
-        return
-    for name in ("tier-mac.env", "tier-all.env"):
+OWN_KEY = "MANNAMINNE_OPENROUTER_API_KEY"
+SHARED_KEY = "OPENROUTER_API_KEY"
+_TIER_DIR = Path.home() / ".secrets"
+
+
+def _tier_value(name):
+    """One value from the tier files a login shell sources but a launchd job may
+    not have. Read into this process only, never printed."""
+    for tier in ("tier-mac.env", "tier-all.env"):
         try:
-            for line in (Path.home() / ".secrets" / name).read_text(encoding="utf-8").splitlines():
-                m = re.match(r"\s*(?:export\s+)?OPENROUTER_API_KEY=(.*)", line)
-                if m:
-                    os.environ["OPENROUTER_API_KEY"] = m.group(1).strip().strip("'\"")
-                    return
+            for line in (_TIER_DIR / tier).read_text(encoding="utf-8").splitlines():
+                m = re.match(r"\s*(?:export\s+)?" + re.escape(name) + r"=(.*)", line)
+                if m and m.group(1).strip().strip("'\""):
+                    return m.group(1).strip().strip("'\"")
         except OSError:
             continue
+    return None
+
+
+def _load_key():
+    """mannaminne's own key first (MANNAMINNE_OPENROUTER_API_KEY, env or tier file),
+    else the shared OPENROUTER_API_KEY. Fredrik 2026-10-18: one OpenRouter key per
+    project, so the dashboard says who spent what. The chosen value is placed in
+    OPENROUTER_API_KEY, which decision_client.py reads."""
+    own = os.environ.get(OWN_KEY) or _tier_value(OWN_KEY)
+    if own:
+        os.environ[SHARED_KEY] = own
+        return
+    if os.environ.get(SHARED_KEY):
+        return
+    shared = _tier_value(SHARED_KEY)
+    if shared:
+        os.environ[SHARED_KEY] = shared
 
 
 def load_client():

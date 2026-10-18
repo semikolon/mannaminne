@@ -120,7 +120,7 @@ sender. `eval/example_queries.json` shows the query-set format with invented que
 |---|---|
 | `py/mannaminne.py` | the CLI: ingest, embed, search, stats, eval |
 | `py/code_chunker.py` | the cAST chunker over tree-sitter |
-| `py/corpus_mail.py`, `py/inbox_*.py`, `py/mail_judge.py` | read-only tools for working through a large mail archive: whole messages from chunks, senders, and which bulk mail can skip the embedding queue |
+| `py/corpus_mail.py`, `py/inbox_*.py`, `py/mail_judge.py` | read-only tools for working through a large mail archive: whole messages from chunks, senders, and which bulk mail can skip the embedding queue. The mail judge pays from `MANNAMINNE_OPENROUTER_API_KEY`, falling back to the shared `OPENROUTER_API_KEY` (one OpenRouter key per project, 2026-10-18) |
 | `py/gmail_sweep.py`, `py/gmail_backfill.py` | moving bulk mail out of Gmail only after a checked copy is on disk and in the index, and indexing mail from before a cut-off date |
 | `py/tests/` | unit tests, plus the tests against the live index, which skip when it is unreachable |
 | `eval/` | the query-set format and how a set is chosen |
