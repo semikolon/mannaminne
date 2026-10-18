@@ -894,6 +894,7 @@ class EmailSubjectRuleTests(unittest.TestCase):
         "telemetry papertrailapp.com\n"
         "keep example.org\n"
         "telemetry subject:A User Error Has Occurred\n"
+        "keep linkedin.com subject:InMail\n"
     )
 
     def _rules(self, text):
@@ -906,7 +907,15 @@ class EmailSubjectRuleTests(unittest.TestCase):
     def test_subject_lines_are_not_read_as_domains(self):
         domains, subjects = self._rules(self.CONFIG)
         self.assertEqual(domains, {"papertrailapp.com": "telemetry", "example.org": "keep"})
-        self.assertEqual(subjects, [("a user error has occurred", "telemetry")])
+        self.assertEqual(subjects, [("a user error has occurred", "telemetry", None),
+                                    ("inmail", "keep", "linkedin.com")])
+
+    def test_a_subject_rule_can_name_its_sender(self):
+        """`keep linkedin.com subject:InMail` keeps the messages people sent through a
+        sender whose other mail is skipped, and touches no other sender's mail."""
+        domains, subjects = self._rules("reading linkedin.com\nkeep linkedin.com subject:InMail\n")
+        self.assertEqual(domains, {"linkedin.com": "reading"})
+        self.assertEqual(subjects, [("inmail", "keep", "linkedin.com")])
 
     def test_missing_config_classifies_nothing(self):
         with mock.patch.object(m, "EMAIL_CLASS_CONFIG", "/nonexistent/email_classes.txt"):
@@ -924,14 +933,17 @@ class EmailSubjectRuleTests(unittest.TestCase):
             cur.execute("SET statement_timeout='60s'")
             domains, _ = m._load_email_rules()
             own = [d for d, c in domains.items()]
-            for needle, cls in subjects:
+            for needle, cls, sender in subjects:
                 cur.execute(f"""SELECT count(*), count(*) FILTER (WHERE e.class = %(cls)s)
                                 FROM chunks c JOIN email_class e ON e.mid = c.source_id
                                 WHERE c.source_kind='email' AND c.chunk_idx=0
-                                  AND {m.SUBJECT_RULE_SQL}""", {"cls": cls, "needle": needle})
+                                  AND {m.SUBJECT_RULE_SQL} AND {m.SUBJECT_SENDER_SQL}""",
+                            {"cls": cls, "needle": needle, "sender": sender})
                 total, classed = cur.fetchone()
                 self.assertGreater(total, 0, f"subject rule {needle!r} matches no mail")
                 self.assertEqual(classed, total, f"{total - classed} mail(s) matching {needle!r} are not {cls}")
+                if sender:
+                    continue   # a rule naming its sender is about that sender's mail, replies included
                 # A reply to machine mail is a person writing: it stays on its domain's class.
                 cur.execute("""SELECT count(*) FROM chunks c JOIN email_class e ON e.mid = c.source_id
                                WHERE c.source_kind='email' AND c.chunk_idx=0
@@ -978,7 +990,7 @@ class EmailDomainRuleConflictTests(unittest.TestCase):
         except m_psycopg_errors() as e:
             self.skipTest(f"index unreachable or busy: {e}")
         _, subjects = m._load_email_rules()
-        subject_classes = {cls for _, cls in subjects}
+        subject_classes = {cls for _, cls, _ in subjects}
         wrong = []
         for domain, cls, n in rows:
             won = m._winning_rule(domain, domains)

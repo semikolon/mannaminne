@@ -1935,13 +1935,18 @@ EMAIL_CLASS_CONFIG = os.path.expanduser("~/.config/mannaminne/email_classes.txt"
 EMBED_SKIP_CLASSES = {"telemetry", "reading", "bulk"}
 
 def _load_email_rules():
-    """(domain → class, [(subject substring, class)]) from the user-editable
-    config. Absent file = classify nothing.
+    """(domain → class, [(subject substring, class, sender domain or None)]) from
+    the user-editable config. Absent file = classify nothing.
 
     A `subject:` line outranks the sender's domain. It exists for machine mail
     sent from a domain whose human mail is kept: measured 2026-10-04, two
     families of automated error mail were 108 603 of apoex.se's messages and a
-    sixth of all email text, inside a domain the config explicitly keeps."""
+    sixth of all email text, inside a domain the config explicitly keeps.
+
+    `<class> <domain> subject:<text>` limits the rule to one sender (and its
+    subdomains). It exists for the opposite case: a message a person sent through
+    a site whose own notices are skipped, such as a social network's direct
+    messages. Replies count there, so such a rule does not step around them."""
     domains, subjects = {}, []
     try:
         with open(EMAIL_CLASS_CONFIG, encoding="utf-8") as fh:
@@ -1956,7 +1961,12 @@ def _load_email_rules():
                 if rest.lower().startswith("subject:"):
                     needle = rest[len("subject:"):].strip().lower()
                     if needle:
-                        subjects.append((needle, cls))
+                        subjects.append((needle, cls, None))
+                elif re.match(r"\S+\s+subject:", rest, re.I):
+                    sender, needle = re.split(r"\s+subject:", rest, maxsplit=1, flags=re.I)
+                    needle = needle.strip().lower()
+                    if needle:
+                        subjects.append((needle, cls, sender.strip().lower()))
                 else:
                     domains[rest.lower()] = cls
     except FileNotFoundError:
@@ -1983,6 +1993,12 @@ def _winning_rule(domain, rules):
 SUBJECT_RULE_SQL = """strpos(lower(c.title), %(needle)s) > 0
         AND left(lower(c.title), strpos(lower(c.title), %(needle)s) - 1)
             !~ '(^|[^a-z])(re|sv|fw|fwd|vb|vs) *:'"""
+
+#: A subject rule that names its sender takes only that sender's mail (and its
+#: subdomains'); one without a sender takes every sender's.
+SUBJECT_SENDER_SQL = """(%(sender)s::text IS NULL OR EXISTS (
+        SELECT 1 FROM email_class sx WHERE sx.mid = c.source_id
+          AND (sx.domain = %(sender)s OR sx.domain LIKE '%%.' || %(sender)s)))"""
 
 def _ensure_email_class(conn, cur, verbose=True):
     """Populate the message-level class table. Cheap, idempotent, resumable."""
@@ -2019,12 +2035,12 @@ def _ensure_email_class(conn, cur, verbose=True):
     # and a `telemetry` subject inside it do not rewrite each other every run.
     cur.execute("CREATE TEMP TABLE IF NOT EXISTS _subject_class (mid text PRIMARY KEY, class text)")
     cur.execute("TRUNCATE _subject_class")
-    for needle, cls in subjects:
+    for needle, cls, sender in subjects:
         cur.execute(f"""INSERT INTO _subject_class (mid, class)
                         SELECT c.source_id, %(cls)s FROM chunks c
                         WHERE c.source_kind='email' AND c.chunk_idx=0
-                          AND {SUBJECT_RULE_SQL}
-                        ON CONFLICT (mid) DO NOTHING""", {"cls": cls, "needle": needle})
+                          AND {SUBJECT_RULE_SQL} AND {SUBJECT_SENDER_SQL}
+                        ON CONFLICT (mid) DO NOTHING""", {"cls": cls, "needle": needle, "sender": sender})
     changed = 0
     # A domain SUFFIX match, so mail.substack.com counts too. Where two rules cover
     # one sender (`reading m.mail.coursera.org` and `keep coursera.org`), the more
