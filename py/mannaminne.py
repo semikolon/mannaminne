@@ -84,7 +84,7 @@ RRF_K = _env_int("MANNAMINNE_RRF_K", 60)
 # tunable per *Architecture vs parameters* (observe misses, tune without code).
 RECENCY_WEIGHT = _env_float("MANNAMINNE_RECENCY_WEIGHT", 0.05, min_value=0.0)
 RECENCY_WINDOW_DAYS = _env_float("MANNAMINNE_RECENCY_WINDOW_DAYS", 730.0, min_value=1.0)
-_PROJECT_RECORD_KINDS = {"doc", "session", "git_commit", "code"}
+_PROJECT_RECORD_KINDS = {"doc", "session", "git_commit", "code", "said"}
 QUERY_INSTRUCTION = os.environ.get(
     "MANNAMINNE_QUERY_INSTRUCTION",
     "Given a personal archive search query, retrieve relevant passages, notes, docs, sessions, tasks, or messages that answer it.",
@@ -738,6 +738,78 @@ def discover_sessions():
                 continue
             title = (parts[0][:80] if parts else sid)
             yield from _rows("session", f"session:{sid}", proj, title, full, created)
+
+#: Lines a user turn can carry that are not Fredrik speaking: a side session's
+#: hand-back, a skill's body loaded into the turn, a hook's verification report.
+_NOT_HIS = ("Another Claude session sent a message", "Base directory for this skill",
+            "# Specification Verification", "<side-sessions-event>", "[Request interrupted")
+
+
+def discover_said():
+    """What Fredrik himself typed into Claude Code, one row per user message
+    (built 2026-10-18, so a session can look up what he said about a thing before
+    predicting what he would say). The `session` kind holds the same words mixed
+    with the assistant's; this kind holds his alone, so a search can be scoped to
+    his voice. Same roots, same noise filters as discover_sessions, plus the
+    turn-shaped texts that sit in a user turn without being his (`_NOT_HIS`,
+    and anything opening with `<`, which is a tool wrapper or an injected
+    reminder). source_id is one per session file, so the per-file skip's carry
+    keeps every message of an unchanged file; chunk_idx runs over the messages."""
+    paths = _session_paths()
+    for base in paths:
+        if not _volume_available(base):
+            raise SourceUnavailable(f"session source volume unmounted: {base}")
+    seen_sids = set()
+    for base in paths:
+        for f in sorted(glob.glob(os.path.join(base, "*/*.jsonl"))):
+            if "subagent" in f:
+                continue
+            sid = Path(f).stem
+            if sid in seen_sids:
+                continue
+            seen_sids.add(sid)
+            source_id = f"said:{sid}"
+            if _unchanged("said", f, source_id=source_id):
+                continue
+            proj = Path(f).parent.name.rsplit("-", 1)[-1]
+            try:
+                fh = open(f, encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            k = 0
+            with fh:
+                for line in fh:
+                    try:
+                        o = json.loads(line)
+                    except Exception:
+                        continue
+                    if o.get("type") != "user" or o.get("isCompactSummary") or o.get("isMeta"):
+                        continue
+                    msg = o.get("message") or {}
+                    if msg.get("role", "user") != "user":
+                        continue
+                    cont = msg.get("content")
+                    if isinstance(cont, str):
+                        texts = [cont]
+                    elif isinstance(cont, list):
+                        texts = [b.get("text", "") for b in cont
+                                 if isinstance(b, dict) and b.get("type") == "text"]
+                    else:
+                        continue
+                    created = (o.get("timestamp") or "")[:10]
+                    for t in texts:
+                        t = t.strip()
+                        if not t or len(t) > 12000 or t.startswith("<"):
+                            continue
+                        if any(mark in t for mark in _NOISE) or any(mark in t for mark in _NOT_HIS):
+                            continue
+                        title = t[:80].replace("\x00", "")
+                        for _, ch in chunk(t):
+                            ch = ch.replace("\x00", "")
+                            yield (f"{source_id}#{k}", "said", source_id, k, proj,
+                                   title, ch, created, created, h(ch))
+                            k += 1
+
 
 # --- email (mbox: Gmail Takeout + curated subsets) --------------------------
 # Streaming parser — never loads the whole file (the Gmail Takeout is 4.7 GB).
@@ -1456,7 +1528,7 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "note": discover_notes, "doc": discover_docs, "session": discover_sessions,
        "email": discover_email, "things3": discover_things3, "fyr": discover_fyr,
        "screenshot": discover_screenshots, "git_commit": discover_git_commits,
-       "code": discover_code}
+       "code": discover_code, "said": discover_said}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -2120,7 +2192,9 @@ SEARCH_WORK_MEM = os.environ.get("MANNAMINNE_SEARCH_WORK_MEM", "64MB")
 #: reads only the smaller part, which fits in Darwin's memory. Measured before the split:
 #: leaving mail out changed no hit on the three eval sets. Written as an exclusion, not a list
 #: of kinds, so a source kind added later is searched by default without anyone remembering it.
-DEFAULT_EXCLUDED_KINDS = ("email",)
+#: `said` (his own messages, 2026-10-18) is left out too: every one of those words is already
+#: in the `session` rows, so a plain search would show each hit twice. `--said` searches it alone.
+DEFAULT_EXCLUDED_KINDS = ("email", "said")
 
 #: The vector index stores half-precision copies (`embedding::halfvec`), about half the size;
 #: the column itself stays full precision. The search orders by this exact expression so the
@@ -2589,7 +2663,7 @@ def cmd_stats(args):
 def _scope(args):
     flags = []
     for k in ("session", "doc", "messenger", "aichat", "note", "email",
-              "things3", "fyr", "screenshot", "git_commit", "code"):
+              "things3", "fyr", "screenshot", "git_commit", "code", "said"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
@@ -2629,6 +2703,9 @@ def _add_search_args(sp):
     sp.add_argument("-p", "--photos", dest="screenshot", action="store_true")
     sp.add_argument("-g", "--git", dest="git_commit", action="store_true")
     sp.add_argument("-c", "--code", action="store_true")
+    sp.add_argument("--said", action="store_true",
+                    help="search only what Fredrik himself typed in Claude Code sessions "
+                         "(left out of a plain search, where -s holds the same words)")
     sp.add_argument("-P", "--project", "--repo", nargs="*",
                     help="restrict to project/repo(s), e.g. --project brf-auto")
     sp.add_argument("--pretty", action="store_true",

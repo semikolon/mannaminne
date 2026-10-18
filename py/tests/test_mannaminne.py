@@ -278,6 +278,38 @@ class SessionDiscoveryTests(unittest.TestCase):
             sids = {r[2] for r in rows}
             self.assertEqual(sids, {"session:dup-sid", "session:arch-only"})
 
+    def test_discover_said_keeps_his_messages_and_drops_the_turns_that_are_not_his(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as live:
+            d = Path(live) / "proj-alpha"
+            d.mkdir(parents=True)
+            def turn(typ, content, **extra):
+                o = {"type": typ, "timestamp": "2026-05-01T10:00:00Z",
+                     "message": {"role": "user" if typ == "user" else "assistant",
+                                 "content": content}}
+                o.update(extra)
+                return json.dumps(o)
+            lines = [
+                turn("user", "Build it, the speaker filter"),
+                turn("assistant", "Building it now"),
+                turn("user", [{"type": "tool_result", "content": "ok"}]),
+                turn("user", "<system-reminder>injected</system-reminder>"),
+                turn("user", "Another Claude session sent a message: done"),
+                turn("user", "summary of earlier work", isCompactSummary=True),
+                turn("user", [{"type": "text", "text": "Isn't this too abstract for Jev?"}]),
+            ]
+            (d / "sid-1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.environ["MANNAMINNE_SESSION_PATHS"] = live
+            rows = list(m.discover_said())
+            texts = [r[6] for r in rows]
+            self.assertEqual(texts, ["Build it, the speaker filter",
+                                     "Isn't this too abstract for Jev?"])
+            self.assertEqual({r[1] for r in rows}, {"said"})
+            self.assertEqual({r[2] for r in rows}, {"said:sid-1"})
+            self.assertEqual([r[3] for r in rows], [0, 1])
+            self.assertEqual({r[4] for r in rows}, {"alpha"})
+            self.assertEqual(rows[0][5], "Build it, the speaker filter")
+
     def test_discover_sessions_raises_on_unmounted_volume(self):
         os.environ["MANNAMINNE_SESSION_PATHS"] = "/Volumes/FERMI/claude-sessions-archive"
         with mock.patch.object(m, "_volume_available", return_value=False):

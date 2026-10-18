@@ -39,7 +39,7 @@ class WhatAPlainSearchLeavesOut(unittest.TestCase):
         a = args()
         scope = m._scope(a)
         self.assertIsNone(scope)
-        self.assertEqual(m._exclude(a, scope), ["email"])
+        self.assertEqual(m._exclude(a, scope), ["email", "said"])
 
     def test_naming_mail_searches_mail(self):
         a = args(email=True)
@@ -58,18 +58,25 @@ class WhatAPlainSearchLeavesOut(unittest.TestCase):
         self.assertIsNone(m._exclude(a, m._scope(a)))
 
     def test_a_new_kind_is_searched_by_default(self):
-        # The default is an exclusion, so a kind nobody listed is still searched.
-        self.assertEqual(tuple(m.DEFAULT_EXCLUDED_KINDS), ("email",))
+        # The default is an exclusion, so a kind nobody listed is still searched. The two
+        # left out are mail (size) and his own messages (already inside the session rows).
+        self.assertEqual(tuple(m.DEFAULT_EXCLUDED_KINDS), ("email", "said"))
+
+    def test_naming_said_searches_his_words_alone(self):
+        a = args(said=True)
+        scope = m._scope(a)
+        self.assertEqual(scope, ["said"])
+        self.assertIsNone(m._exclude(a, scope))
 
     def test_eval_cases_search_what_a_plain_search_searches(self):
-        self.assertEqual(m._case_exclude({"query": "x"}), ["email"])
+        self.assertEqual(m._case_exclude({"query": "x"}), ["email", "said"])
         self.assertIsNone(m._case_exclude({"query": "x", "scope": "doc"}))
         self.assertIsNone(m._case_exclude({"query": "x", "all": True}))
 
     def test_the_coverage_count_leaves_out_what_the_search_leaves_out(self):
-        sql, params = m._coverage_sql(None, None, ["email"])
+        sql, params = m._coverage_sql(None, None, ["email", "said"])
         self.assertIn("WHERE source_kind <> ALL(%s)", sql)
-        self.assertEqual(params, [["email"]])
+        self.assertEqual(params, [["email", "said"]])
         self.assertEqual(sql.count("%s"), len(params))
 
 
