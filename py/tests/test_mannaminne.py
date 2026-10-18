@@ -1045,3 +1045,23 @@ class EvalFileLocationTests(unittest.TestCase):
 def m_psycopg_errors():
     import psycopg
     return (psycopg.OperationalError, psycopg.errors.QueryCanceled, FileNotFoundError)
+
+
+class WaitingCountTests(unittest.TestCase):
+    """`stats --waiting` is the queue embed works from: skipped mail is not in it."""
+
+    def test_live_the_queue_leaves_out_skipped_mail(self):
+        try:
+            conn = m.load_conn()
+            cur = conn.cursor()
+            cur.execute("SET statement_timeout='60s'")
+            waiting = m.waiting_count(cur)
+            cur.execute("SELECT count(*) FROM chunks WHERE embedding IS NULL")
+            raw = cur.fetchone()[0]
+            cur.execute(f"""SELECT count(*) FROM chunks c JOIN email_class e ON e.mid = c.source_id
+                            WHERE c.embedding IS NULL AND e.class = ANY(%s)""",
+                        (list(m.EMBED_SKIP_CLASSES),))
+            skipped = cur.fetchone()[0]
+        except m_psycopg_errors() as e:
+            self.skipTest(f"index unreachable or busy: {e}")
+        self.assertEqual(waiting, raw - skipped)

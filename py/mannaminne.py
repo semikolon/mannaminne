@@ -1934,6 +1934,19 @@ EMAIL_CLASS_CONFIG = os.path.expanduser("~/.config/mannaminne/email_classes.txt"
 #: above it always win, and a rule written later overrules it.
 EMBED_SKIP_CLASSES = {"telemetry", "reading", "bulk"}
 
+#: A chunk `c` that embed would take: not mail in a skipped class. With `embedding IS NULL`
+#: this is the queue, the one figure that means "waiting to be embedded" (a raw NULL count
+#: also holds the skipped mail, three times as much in 2026-10). Parameter: the skip list.
+EMBED_TAKES_SQL = """NOT EXISTS (SELECT 1 FROM email_class e
+                                 WHERE e.mid = split_part(c.id,'#',1) AND e.class = ANY(%s))"""
+
+
+def waiting_count(cur):
+    """How many chunks embed would still take: the queue by the production predicate."""
+    cur.execute("SELECT count(*) FROM chunks c WHERE c.embedding IS NULL AND " + EMBED_TAKES_SQL,
+                (list(EMBED_SKIP_CLASSES),))
+    return cur.fetchone()[0]
+
 def _load_email_rules():
     """(domain → class, [(subject substring, class, sender domain or None)]) from
     the user-editable config. Absent file = classify nothing.
@@ -2121,10 +2134,7 @@ def cmd_embed(args):
             select_limit = min(select_limit, remaining)
         # Skip, don't sort. Ordering still queues the junk; filtering never does.
         cur.execute("""SELECT c.id,c.text FROM chunks c
-                       WHERE c.embedding IS NULL""" + scope_sql + """
-                         AND NOT EXISTS (SELECT 1 FROM email_class e
-                                         WHERE e.mid = split_part(c.id,'#',1)
-                                           AND e.class = ANY(%s))
+                       WHERE c.embedding IS NULL""" + scope_sql + " AND " + EMBED_TAKES_SQL + """
                        LIMIT %s""", (*scope_params, list(EMBED_SKIP_CLASSES), select_limit))
         rows = cur.fetchall()
         conn.commit()  # close the read transaction before slow network embedding work
@@ -2829,7 +2839,11 @@ def main():
                         help="only mail from these sender domains (subdomains count)")
         cmd_embed(sp.parse_args(rest))
     elif cmd == "stats":
-        cmd_stats(None)
+        if "--waiting" in rest:   # one number, for scripts: the embedding queue
+            conn = load_conn()
+            print(waiting_count(conn.cursor()))
+        else:
+            cmd_stats(None)
     elif cmd == "judge-mail":
         sp = argparse.ArgumentParser(prog="mannaminne judge-mail",
                                      description="Class the mail no sender rule places, from sender and subject.")
