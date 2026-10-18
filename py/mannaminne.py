@@ -2514,6 +2514,19 @@ def _coverage_notice(rows=None, error=None, late=False):
     return ("mannaminne: search by meaning is PARTIAL here. Chunks with no embedding yet: " + " · ".join(parts)
             + ". Those can be found by shared words only, and the newest notes are the likeliest to be among them.")
 
+def _whole_texts(ids):
+    """The whole chunk text for each hit id, one query (`--whole`)."""
+    if not ids:
+        return {}
+    conn = load_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, text FROM chunks WHERE id = ANY(%s)", [list(ids)])
+            return {i: t for i, t in cur.fetchall()}
+    finally:
+        conn.close()
+
+
 def cmd_search(args):
     q = " ".join(args.query)
     scope = _scope(args)
@@ -2543,9 +2556,11 @@ def cmd_search(args):
         # filters the results cannot accidentally strip recency/source/relevance
         # (the 2026-07 miss that motivated making JSON the default). No results
         # → zero lines (exit 0). --pretty restores the coloured human prose.
+        whole = _whole_texts([x["r"][0] for x in ranked]) if getattr(args, "whole", False) else {}
         for i, x in enumerate(ranked, 1):
             r = x["r"]
             print(json.dumps({
+                **({"text": whole.get(r[0], "")} if whole or getattr(args, "whole", False) else {}),
                 "rank": i,
                 "source": r[1],
                 "created": r[5] or None,
@@ -2776,6 +2791,10 @@ def _add_search_args(sp):
                          "(left out of a plain search, where -s holds the same words)")
     sp.add_argument("-P", "--project", "--repo", nargs="*",
                     help="restrict to project/repo(s), e.g. --project brf-auto")
+    sp.add_argument("--whole", action="store_true",
+                    help="JSONL only: add a `text` field with each hit's whole chunk. The snippet is a "
+                         "window on the match for choosing what to open; a reader that quotes or predicts "
+                         "from a hit needs the room, not the window (2026-10-18).")
     sp.add_argument("--pretty", action="store_true",
                     help="human-readable coloured prose output. DEFAULT is JSONL "
                          "(one JSON object per hit with date/source/score/snippet "
