@@ -68,6 +68,16 @@ it was about 2.35 million chunks, four fifths of them mail.
 
 The details, and what each choice taught along the way: [`docs/how-it-works.md`](docs/how-it-works.md).
 
+## What else reads the index
+
+Two of the owner's other tools read this database directly, so a change to these shapes is a
+change to them too:
+
+| Reader | Reads | If the shape changes |
+|---|---|---|
+| `natverk`, a private register of the people the owner knows | the first chunk of every mail (its `From:`, `To:` and `Cc:` lines and date), `email_class.class`, and document chunks by `source_id` (`doc:<first folder>:<path>`) in `chunk_idx` order | its build refuses a reading that holds less than half of the last one and keeps the old one, so the break shows in `natverk --check` rather than as missing people |
+| `job-watch` | `py/inbox_assignments.py --json --check` | the daily job-ad push stops finding broker mail |
+
 ## Usage
 
 ```bash
