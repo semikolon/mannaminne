@@ -1364,6 +1364,14 @@ def _ocr_text(path, cache):
 
 def discover_screenshots():
     import json as _json
+    # An unmounted FERMI or VOLTA would make this walk emit fewer rows, or rows
+    # without their OCR text, and the orphan prune would then delete what the
+    # index holds. The drive being away is not the data being gone: skip the kind.
+    for base in (_FERMI_SS, _FERMI_PHOTOLIB, _VOLTA_SS):
+        if not _volume_available(base):
+            raise SourceUnavailable(f"screenshot source volume unmounted: {base}")
+    if not _volta_originals():
+        raise SourceUnavailable(f"no readable export db at {_VOLTA_SS}")
     cache = {}
     if _OCR_CACHE.exists():
         try:
@@ -1401,6 +1409,7 @@ def discover_screenshots():
                          f"{name}\n{txt}", created)
 
     # (2) iPhone / Photos library — OCR screenshots, label everything
+    seen_uuids = set()
     if not (limit and n >= limit):
         try:
             import osxphotos
@@ -1413,6 +1422,7 @@ def discover_screenshots():
                 if limit and n >= limit:
                     break
                 n += 1
+                seen_uuids.add(p.uuid)
                 labels = ", ".join((p.labels or [])[:10])
                 src = p.path or (_volta_originals().get(p.uuid) if p.screenshot else None)
                 txt = _ocr_text(src, cache) if (src and p.screenshot) else ""
@@ -1425,6 +1435,41 @@ def discover_screenshots():
                 yield from _rows("screenshot", f"photo:{p.uuid}", lbl, head, body, created)
                 if n % 200 == 0:
                     _flush()
+
+    # (3) Screenshots that have left the library but whose original is on VOLTA.
+    # Deleting screenshots from Photos to free iCloud must not delete their text:
+    # without this the walk above emits no row for them and the orphan prune drops
+    # it. The row is built exactly as in (2), from the Photos record osxphotos saved
+    # at export time, so its id, body and hash are unchanged and nothing re-embeds.
+    if not (limit and n >= limit):
+        vo = _volta_originals()
+        try:
+            import sqlite3
+            con = sqlite3.connect(
+                f"file:{os.path.join(_VOLTA_SS, '.osxphotos_export.db')}?mode=ro", uri=True)
+            records = con.execute("SELECT uuid, photoinfo FROM photoinfo").fetchall()
+            con.close()
+        except Exception:
+            records = []
+            _PARTIAL_KINDS.add("screenshot")  # cannot tell which left the library: prune nothing
+        for uuid, raw in records:
+            if uuid in seen_uuids or uuid not in vo:
+                continue
+            try:
+                pi = _json.loads(raw)
+            except Exception:
+                continue
+            if not pi.get("screenshot"):
+                continue
+            n += 1
+            labels = ", ".join((pi.get("labels") or [])[:10])
+            txt = _ocr_text(vo[uuid], cache)
+            if not txt and not labels:
+                continue
+            head = pi.get("original_filename") or uuid[:10]
+            created = (pi.get("date") or "")[:10]
+            body = f"{head} [{labels}]" + (f"\n{txt}" if txt else "")
+            yield from _rows("screenshot", f"photo:{uuid}", "iphone-screenshot", head, body, created)
     _flush()
     print(f"  screenshots/photos: {n} images processed (OCR cached at {_OCR_CACHE})", flush=True)
 

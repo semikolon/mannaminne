@@ -67,6 +67,17 @@ scope has no embeddings yet, the search says how much.
 - **It only forgets what it has proved is gone.** A nightly run deletes chunks it did not see, so
   a skipped file counts as seen, a source on an unplugged disk raises an error instead of looking
   empty, and mail is never deleted.
+- **Gone means gone from the copy that is kept, and only where one is declared** (2026-10-21).
+  Screenshots are deleted from Photos to free iCloud while their originals and Photos records stay
+  on VOLTA (`.osxphotos_export.db`), so a screenshot that has left the library is read from VOLTA
+  with the same id and text, and FERMI or VOLTA being away skips the kind for the night. This is
+  not a rule that a vanished source keeps its rows. Elsewhere disappearance usually means the row
+  should go: a moved or renamed document would otherwise appear twice, and a file deleted because
+  it was wrong would linger. Three consequences of the screenshot case: to make the index forget a
+  screenshot, its file has to leave VOLTA too (restic still holds it); a screenshot put back into
+  Photos gets a new id, so it is found twice until the old record is removed; and ordinary photos
+  have no copy on VOLTA, so deleting one from Photos still drops its labels from the index.
+  `tests/test_screenshot_archive_rows.py` pins it.
 - **When unsure, keep.** Mail no rule places is sorted by a small model that sees only sender and
   subject. Written rules always win, and mail the model is less than 80 % sure about stays
   unsorted. The cleanup tools refuse to run without the list of senders to protect: if that list
