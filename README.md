@@ -36,7 +36,7 @@ claim that something is new, was never tried, or does not exist.
 | `code` | source files from about forty repositories, chunked along the syntax tree |
 | `git_commit` | the commit messages of the same repositories |
 | `things3`, `fyr` | task lists |
-| `screenshot` | text read from screenshots with Apple's on-device OCR |
+| `screenshot` | text read from screenshots with Apple's on-device OCR; a screenshot deleted from Photos keeps its text, read from its original on VOLTA (`docs/how-it-works.md`, *Gone means gone from the copy that is kept*) |
 
 `mannaminne stats` prints the current size and how much of it has embeddings. In October 2026
 it was about 2.35 million chunks, four fifths of them mail.
