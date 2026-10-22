@@ -278,6 +278,53 @@ class SessionDiscoveryTests(unittest.TestCase):
             sids = {r[2] for r in rows}
             self.assertEqual(sids, {"session:dup-sid", "session:arch-only"})
 
+    def test_discover_fbgroup_one_source_per_post_dated_to_the_latest_year(self):
+        # The fixture is one real post of Fredrik's own with his own comment under it,
+        # copied from the archive (post 281209868594309); no other member's words.
+        import tempfile
+        archive = {"group": "Collaborative Argumentation Analysis", "scrape_date": "2026-03-27",
+                   "posts": [
+                       {"post_id": "281209868594309",
+                        "post_url": "https://www.facebook.com/groups/arguable/posts/281209868594309/",
+                        "poster_name": "Fredrik Bränström", "timestamp": "14y",
+                        "content": "A map of possible features.",
+                        "comments": [{"author": "Fredrik Bränström",
+                                      "content": "...along with approximate delineation of the \"minimum viable product\", MVP."}]},
+                       {"post_id": "2", "post_url": "https://www.facebook.com/groups/arguable/posts/2/",
+                        "poster_name": "Fredrik Bränström", "timestamp": "",
+                        "content": "", "comments": []}]}
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "2026-03-27_archive.json").write_text(json.dumps(archive), encoding="utf-8")
+            Path(d, "2026-03-27_archive.first-run.json").write_text(
+                json.dumps({"group": "x", "scrape_date": "2026-03-27",
+                            "posts": [{"post_id": "9", "poster_name": "Fredrik Bränström",
+                                       "timestamp": "14y", "content": "stale", "comments": []}]}),
+                encoding="utf-8")
+            old_fp = m._FINGERPRINT_FILE
+            m._FINGERPRINT_FILE = str(Path(d) / "fp.json")
+            try:
+                with mock.patch.dict(os.environ, {"MANNAMINNE_FBGROUP_DIR": d}):
+                    rows = list(m.discover_fbgroup())
+            finally:
+                m._FINGERPRINT_FILE = old_fp
+                m._PENDING_FINGERPRINTS.pop("fbgroup", None)
+        by_sid = {}
+        for r in rows:
+            by_sid.setdefault(r[2], []).append(r)
+        self.assertEqual(set(by_sid), {"fbgroup:281209868594309", "fbgroup:2"})   # the first run is skipped
+        post = by_sid["fbgroup:281209868594309"][0]
+        self.assertEqual(post[1], "fbgroup")
+        self.assertEqual(post[4], "deliberus")
+        self.assertEqual(post[5], "Fredrik Bränström: A map of possible features.")
+        self.assertEqual(post[7], "2012-03-27")                       # 14 years before the scrape, the latest it can be
+        self.assertIn('between 2011-03-27 and 2012-03-27 (Facebook showed "14y" on 2026-03-27)', post[6])
+        self.assertIn("\n\nComments:\nFredrik Bränström: ...along with approximate delineation", post[6])
+        empty = by_sid["fbgroup:2"][0]
+        self.assertEqual(empty[7], "")
+        self.assertEqual(empty[5], "Fredrik Bränström: (link or photo post)")
+        self.assertIn("date not captured", empty[6])
+        self.assertIn("(link or photo post; the text was not captured)", empty[6])
+
     def test_discover_said_keeps_his_messages_and_drops_the_turns_that_are_not_his(self):
         import tempfile
         with tempfile.TemporaryDirectory() as live:

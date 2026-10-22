@@ -289,6 +289,68 @@ def discover_aichat():
         uuid = j.get("uuid") or Path(f).stem
         yield from _rows("aichat", f"aichat:cl:{uuid}", "claude", name or uuid[:60], full, created)
 
+#: The Facebook group "Collaborative Argumentation Analysis" (2011 to 2013, the first
+#: public home of what became Deliberus), from the archive the Deliberus repository
+#: keeps in data/fb_group_archive/<scrape-date>_archive.json: 406 posts and 1,956
+#: comments by 143 people, scraped 2026-03-27. One source per post, its comments
+#: under it. Facebook showed only a relative age per post ("13y") and nothing on a
+#: comment, so a post's `created` is the LATEST date it can have (the scrape date
+#: minus that many years) and the header gives the year-wide range; exact dates are a
+#: backfill to-do in the Deliberus TODO. The archive's first-run and partial files are
+#: skipped: the first run held 198 duplicate comments and 20 from another page.
+_FBGROUP_AGE_RE = re.compile(r"^(\d+)\s*y$")
+
+
+def _fbgroup_files():
+    base = os.environ.get("MANNAMINNE_FBGROUP_DIR") or os.path.join(
+        HOME, "Projects/deliberus/data/fb_group_archive")
+    return sorted(f for f in glob.glob(os.path.join(base, "*_archive.json"))
+                  if "first-run" not in os.path.basename(f)
+                  and "partial" not in os.path.basename(f))
+
+
+def _fbgroup_dates(age, scrape_date):
+    """(created, phrase). `created` is the latest date the post can have; the phrase
+    says the range a reader may take it to lie in."""
+    m = _FBGROUP_AGE_RE.match((age or "").strip())
+    if not m or not scrape_date:
+        return "", "date not captured"
+    n = int(m.group(1))
+    y, mo, d = scrape_date.split("-")
+    latest = f"{int(y) - n}-{mo}-{d}"
+    earliest = f"{int(y) - n - 1}-{mo}-{d}"
+    return latest, f'between {earliest} and {latest} (Facebook showed "{age.strip()}" on {scrape_date})'
+
+
+def discover_fbgroup():
+    files = _fbgroup_files()
+    _skip_if_unchanged("fbgroup", files)
+    posts = {}
+    for f in files:                      # ascending by name, i.e. by scrape date: the newest file wins
+        try:
+            j = json.load(open(f))
+        except Exception:
+            continue
+        group = j.get("group") or "Facebook group"
+        scrape = j.get("scrape_date") or ""
+        for p in j.get("posts") or []:
+            pid = p.get("post_id")
+            if pid:
+                posts[pid] = (group, scrape, p)
+    for pid, (group, scrape, p) in posts.items():
+        poster = (p.get("poster_name") or "").strip()
+        content = (p.get("content") or "").strip()
+        created, when = _fbgroup_dates(p.get("timestamp"), scrape)
+        head = f"Facebook group {group}, post by {poster or 'an unnamed member'}, {when}. {p.get('post_url') or ''}".strip()
+        body = content or "(link or photo post; the text was not captured)"
+        lines = [f"{(c.get('author') or '').strip()}: {(c.get('content') or '').strip()}"
+                 for c in (p.get("comments") or []) if (c.get("content") or "").strip()]
+        full = head + "\n\n" + body + ("\n\nComments:\n" + "\n".join(lines) if lines else "")
+        first = content.split("\n")[0][:70] if content else "(link or photo post)"
+        title = f"{poster}: {first}" if poster else first
+        yield from _rows("fbgroup", f"fbgroup:{pid}", "deliberus", title, full, created)
+
+
 #: The `.txt` files in the Simplenote support export carry no timestamps at all,
 #: so every note chunk ingested before 2026-08-13 had an EMPTY date — invisible to
 #: date filters and unrankable by recency, across a decade of Fredrik's own
@@ -1625,7 +1687,7 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "note": discover_notes, "doc": discover_docs, "session": discover_sessions,
        "email": discover_email, "things3": discover_things3, "fyr": discover_fyr,
        "screenshot": discover_screenshots, "git_commit": discover_git_commits,
-       "code": discover_code, "said": discover_said}
+       "code": discover_code, "said": discover_said, "fbgroup": discover_fbgroup}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -2633,7 +2695,7 @@ def cmd_search(args):
            "aichat": "\033[34m[aichat]", "note": "\033[32m[note]", "email": "\033[90m[email]",
            "things3": "\033[93m[things3]", "fyr": "\033[91m[fyr]",
            "screenshot": "\033[96m[shot]", "git_commit": "\033[92m[commit]",
-           "code": "\033[94m[code]"}
+           "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]"}
     for i, x in enumerate(ranked, 1):
         r = x["r"]
         kw = " \033[32m[kw]\033[0m" if x["kw"] else ""
@@ -2801,7 +2863,7 @@ def cmd_stats(args):
 def _scope(args):
     flags = []
     for k in ("session", "doc", "messenger", "aichat", "note", "email",
-              "things3", "fyr", "screenshot", "git_commit", "code", "said"):
+              "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
@@ -2844,6 +2906,9 @@ def _add_search_args(sp):
     sp.add_argument("--said", action="store_true",
                     help="search only what Fredrik himself typed in Claude Code sessions "
                          "(left out of a plain search, where -s holds the same words)")
+    sp.add_argument("--fbgroup", action="store_true",
+                    help="the 2011-2013 Facebook group (Collaborative Argumentation Analysis), "
+                         "one source per post with its comments")
     sp.add_argument("-P", "--project", "--repo", nargs="*",
                     help="restrict to project/repo(s), e.g. --project brf-auto")
     sp.add_argument("--whole", action="store_true",

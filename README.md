@@ -36,6 +36,7 @@ claim that something is new, was never tried, or does not exist.
 | `code` | source files from about forty repositories, chunked along the syntax tree |
 | `git_commit` | the commit messages of the same repositories |
 | `things3`, `fyr` | task lists |
+| `fbgroup` | the Facebook group where Deliberus was first discussed, 2011 to 2013: 406 posts with their comments, scraped once in March 2026; a post is dated to the latest year Facebook's relative age allows |
 | `screenshot` | text read from screenshots with Apple's on-device OCR; a screenshot deleted from Photos keeps its text, read from its original on VOLTA (`docs/how-it-works.md`, *Gone means gone from the copy that is kept*) |
 
 `mannaminne stats` prints the current size and how much of it has embeddings. In October 2026
@@ -99,7 +100,7 @@ table, so leaving it out keeps a search in the part that fits in memory; `-e` se
 
 Source flags narrow a search to one or more kinds: `-s` sessions, `-d` docs, `-m` Messenger,
 `-a` AI chats, `--note`, `-e` email, `-t` Things 3, `-f` Fyr, `-p` screenshots, `-g` commits,
-`-c` code, `--said` what I typed in Claude Code (left out of a plain search, since the session
+`-c` code, `--fbgroup` the Facebook group, `--said` what I typed in Claude Code (left out of a plain search, since the session
 rows hold the same words). `-P` (also `--repo`) narrows to named projects; put it last, since it takes several
 names. Invoked as `ccsearch`, the tool searches sessions, docs, commits and code by default.
 
