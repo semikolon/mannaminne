@@ -295,8 +295,9 @@ def discover_aichat():
 #: comments by 143 people, scraped 2026-03-27. One source per post, its comments
 #: under it. Facebook showed only a relative age per post ("13y") and nothing on a
 #: comment, so a post's `created` is the LATEST date it can have (the scrape date
-#: minus that many years) and the header gives the year-wide range; exact dates are a
-#: backfill to-do in the Deliberus TODO. The archive's first-run and partial files are
+#: minus that many years) and the header gives the year-wide range. A post the scraper
+#: re-visited since 2026-10-22 carries `date`, read off the post's own header, and that
+#: is used whole. The archive's first-run and partial files are
 #: skipped: the first run held 198 duplicate comments and 20 from another page.
 _FBGROUP_AGE_RE = re.compile(r"^(\d+)\s*y$")
 
@@ -340,7 +341,14 @@ def discover_fbgroup():
     for pid, (group, scrape, p) in posts.items():
         poster = (p.get("poster_name") or "").strip()
         content = (p.get("content") or "").strip()
-        created, when = _fbgroup_dates(p.get("timestamp"), scrape)
+        # A re-harvested post (2026-10-22 on) carries the date read off its own header, and
+        # every post its own scraped_at, so a carried-forward post keeps the window measured
+        # on the day it was read rather than the file's date.
+        read_on = (p.get("scraped_at") or "")[:10] or scrape
+        if p.get("date"):
+            created, when = p["date"], f"on {p['date']} (the post's own header, read {read_on})"
+        else:
+            created, when = _fbgroup_dates(p.get("timestamp"), read_on)
         head = f"Facebook group {group}, post by {poster or 'an unnamed member'}, {when}. {p.get('post_url') or ''}".strip()
         body = content or "(link or photo post; the text was not captured)"
         lines = [f"{(c.get('author') or '').strip()}: {(c.get('content') or '').strip()}"

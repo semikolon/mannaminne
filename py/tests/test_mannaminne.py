@@ -292,7 +292,16 @@ class SessionDiscoveryTests(unittest.TestCase):
                                       "content": "...along with approximate delineation of the \"minimum viable product\", MVP."}]},
                        {"post_id": "2", "post_url": "https://www.facebook.com/groups/arguable/posts/2/",
                         "poster_name": "Fredrik Bränström", "timestamp": "",
-                        "content": "", "comments": []}]}
+                        "content": "", "comments": []},
+                       # A re-harvested post: its header's date wins over the relative age, and its
+                       # own scraped_at (not the file's date) is what the phrase says it was read on.
+                       {"post_id": "765070753541549",
+                        "post_url": "https://www.facebook.com/groups/arguable/posts/765070753541549/",
+                        "poster_name": "Fredrik Bränström", "timestamp": "11y",
+                        "date": "2014-11-27", "date_text": "November 27, 2014",
+                        "scraped_at": "2026-10-22T20:00:00+02:00",
+                        "content": "So, I was involved in making this happen as a web startup last year.",
+                        "comments": []}]}
         with tempfile.TemporaryDirectory() as d:
             Path(d, "2026-03-27_archive.json").write_text(json.dumps(archive), encoding="utf-8")
             Path(d, "2026-03-27_archive.first-run.json").write_text(
@@ -311,7 +320,10 @@ class SessionDiscoveryTests(unittest.TestCase):
         by_sid = {}
         for r in rows:
             by_sid.setdefault(r[2], []).append(r)
-        self.assertEqual(set(by_sid), {"fbgroup:281209868594309", "fbgroup:2"})   # the first run is skipped
+        self.assertEqual(set(by_sid), {"fbgroup:281209868594309", "fbgroup:2", "fbgroup:765070753541549"})   # the first run is skipped
+        dated = by_sid["fbgroup:765070753541549"][0]
+        self.assertEqual(dated[7], "2014-11-27")
+        self.assertIn("on 2014-11-27 (the post's own header, read 2026-10-22)", dated[6])
         post = by_sid["fbgroup:281209868594309"][0]
         self.assertEqual(post[1], "fbgroup")
         self.assertEqual(post[4], "deliberus")
