@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import mannaminne as m  # noqa: E402
 
 KINDS = ("session", "doc", "messenger", "aichat", "note", "email",
-         "things3", "fyr", "screenshot", "git_commit", "code", "fbgroup")
+         "things3", "fyr", "screenshot", "git_commit", "code", "fbgroup", "ruby")
 
 
 def args(**on):

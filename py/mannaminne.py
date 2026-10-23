@@ -359,6 +359,50 @@ def discover_fbgroup():
         yield from _rows("fbgroup", f"fbgroup:{pid}", "deliberus", title, full, created)
 
 
+#: Ruby, the voice assistant in the TTS daemon, logs every exchange here: what Fredrik said and
+#: what she answered, from 2026-01-16. Added 2026-10-23 at his request ("It should. It could also
+#: index her replies."), because nothing else in the index holds what he said aloud.
+RUBY_LOG = os.path.join(HOME, ".claude/logs/ruby_conversations.jsonl")
+_VOICE_TAG = re.compile(r"\[[a-z][a-z ]{0,20}\]\s*")   # [calm], [warm]: how to speak, not words
+_SIZE_NOTE = "Generated response ("                     # the backfill kept a size note, not the reply
+
+
+def discover_ruby():
+    """One source per conversation thread (lines without a thread are grouped per day), with
+    both voices: `Fredrik: ...` then `Ruby: ...`. Dated from its first exchange to its last."""
+    path = os.environ.get("MANNAMINNE_RUBY_LOG", RUBY_LOG)
+    if not os.path.exists(path):
+        return
+    _skip_if_unchanged("ruby", [path])
+    threads = {}
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            day = (o.get("timestamp") or "")[:10]
+            key = o.get("thread_id") or day
+            if not key:
+                continue
+            said = (o.get("user_text") or "").strip()
+            reply = _VOICE_TAG.sub("", o.get("assistant_text") or "").strip()
+            if reply.startswith(_SIZE_NOTE):
+                reply = ""
+            t = threads.setdefault(key, {"first": day, "last": day, "lines": []})
+            t["last"] = day or t["last"]
+            if said:
+                t["lines"].append(f"Fredrik: {said}")
+            if reply:
+                t["lines"].append(f"Ruby: {reply}")
+    for key, t in threads.items():
+        if not t["lines"]:
+            continue
+        first = t["lines"][0].split(": ", 1)[-1]
+        yield from _rows("ruby", f"ruby:{key}", "ruby", first[:80], "\n".join(t["lines"]),
+                         t["first"], updated=t["last"])
+
+
 #: The `.txt` files in the Simplenote support export carry no timestamps at all,
 #: so every note chunk ingested before 2026-08-13 had an EMPTY date — invisible to
 #: date filters and unrankable by recency, across a decade of Fredrik's own
@@ -1695,7 +1739,8 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "note": discover_notes, "doc": discover_docs, "session": discover_sessions,
        "email": discover_email, "things3": discover_things3, "fyr": discover_fyr,
        "screenshot": discover_screenshots, "git_commit": discover_git_commits,
-       "code": discover_code, "said": discover_said, "fbgroup": discover_fbgroup}
+       "code": discover_code, "said": discover_said, "fbgroup": discover_fbgroup,
+       "ruby": discover_ruby}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -2703,7 +2748,8 @@ def cmd_search(args):
            "aichat": "\033[34m[aichat]", "note": "\033[32m[note]", "email": "\033[90m[email]",
            "things3": "\033[93m[things3]", "fyr": "\033[91m[fyr]",
            "screenshot": "\033[96m[shot]", "git_commit": "\033[92m[commit]",
-           "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]"}
+           "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]",
+           "ruby": "\033[91m[ruby]"}
     for i, x in enumerate(ranked, 1):
         r = x["r"]
         kw = " \033[32m[kw]\033[0m" if x["kw"] else ""
@@ -2871,7 +2917,7 @@ def cmd_stats(args):
 def _scope(args):
     flags = []
     for k in ("session", "doc", "messenger", "aichat", "note", "email",
-              "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup"):
+              "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup", "ruby"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
@@ -2917,6 +2963,9 @@ def _add_search_args(sp):
     sp.add_argument("--fbgroup", action="store_true",
                     help="the 2011-2013 Facebook group (Collaborative Argumentation Analysis), "
                          "one source per post with its comments")
+    sp.add_argument("--ruby", action="store_true",
+                    help="what Fredrik said to Ruby, the voice assistant, and what she answered "
+                         "(from 2026-01-16)")
     sp.add_argument("-P", "--project", "--repo", nargs="*",
                     help="restrict to project/repo(s), e.g. --project brf-auto")
     sp.add_argument("--whole", action="store_true",

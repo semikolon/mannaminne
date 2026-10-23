@@ -337,6 +337,53 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIn("date not captured", empty[6])
         self.assertIn("(link or photo post; the text was not captured)", empty[6])
 
+    def test_discover_ruby_one_source_per_thread_with_both_voices(self):
+        # Copied from ~/.claude/logs/ruby_conversations.jsonl (the first line, a backfill whose
+        # reply was kept only as a size note, and the 2026-07-03 bedroom test), chosen because
+        # this repository is public and these two say nothing private.
+        import tempfile
+        lines = [
+            {"timestamp": "2026-01-16T23:49:06.352245", "thread_id": None, "source": "backfill",
+             "user_text": "Okay, so what happens then?...",
+             "assistant_text": "Generated response (551 chars, cost $0.000800): 'Now that it’s persisted to disk, the daemon will r...'",
+             "assistant_truncated": True, "model": None, "concern_type": None,
+             "narration_id": None, "tools_used": False},
+            {"timestamp": "2026-07-03T12:13:00.000000Z", "thread_id": "t-bedroom", "source": "direct",
+             "user_text": "Hey, Ruby. Can you hear me? This is my bedroom. This is me.",
+             "assistant_text": "[calm][warm] I hear you, Fredrik. I am here, in the quiet of your room, listening.",
+             "assistant_truncated": False, "model": "gemini-3.5-flash", "concern_type": None,
+             "narration_id": None, "tools_used": True},
+            {"timestamp": "2026-07-04T00:10:00.000000Z", "thread_id": "t-bedroom", "source": "direct",
+             "user_text": "Goodnight.", "assistant_text": "[soft] Goodnight.",
+             "assistant_truncated": False, "model": "gemini-3.5-flash", "concern_type": None,
+             "narration_id": None, "tools_used": False},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d, "ruby_conversations.jsonl")
+            log.write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n", encoding="utf-8")
+            old_fp = m._FINGERPRINT_FILE
+            m._FINGERPRINT_FILE = str(Path(d) / "fp.json")
+            try:
+                with mock.patch.dict(os.environ, {"MANNAMINNE_RUBY_LOG": str(log)}):
+                    rows = list(m.discover_ruby())
+            finally:
+                m._FINGERPRINT_FILE = old_fp
+                m._PENDING_FINGERPRINTS.pop("ruby", None)
+        by_sid = {}
+        for r in rows:
+            by_sid.setdefault(r[2], []).append(r)
+        self.assertEqual(set(by_sid), {"ruby:t-bedroom", "ruby:2026-01-16"})
+        thread = by_sid["ruby:t-bedroom"][0]
+        self.assertEqual((thread[1], thread[4]), ("ruby", "ruby"))
+        self.assertEqual((thread[7], thread[8]), ("2026-07-03", "2026-07-04"))
+        self.assertTrue(thread[5].startswith("Hey, Ruby. Can you hear me?"))
+        self.assertIn("Fredrik: Hey, Ruby. Can you hear me?", thread[6])
+        self.assertIn("Ruby: I hear you, Fredrik.", thread[6])        # the voice tags are not words
+        self.assertIn("Ruby: Goodnight.", thread[6])
+        backfill = by_sid["ruby:2026-01-16"][0][6]
+        self.assertIn("Fredrik: Okay, so what happens then?", backfill)
+        self.assertNotIn("Generated response", backfill)               # a size note, not her reply
+
     def test_discover_said_keeps_his_messages_and_drops_the_turns_that_are_not_his(self):
         import tempfile
         with tempfile.TemporaryDirectory() as live:
