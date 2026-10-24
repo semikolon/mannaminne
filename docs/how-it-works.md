@@ -45,8 +45,9 @@ the terms, and a small probe per term. A vector search runs beside them. The ran
 merged with reciprocal rank fusion and de-duplicated per document, so one long conversation
 cannot fill the page; identical text from two documents (a resumed session repeating a prompt)
 shows once. A per-term probe counts by how rare the term is, so *make* or *walk* in a long
-question no longer outvotes the words that carry it (2026-10-25: precision on a walkthrough
-question rose from 0.30 to 0.50 at twenty hits, `eval/said_precision.py`). Each hit shows a snippet centred on the match. When part of the searched
+question no longer outvotes the words that carry it (`eval/said_precision.py` measures it on
+five questions about audio walkthroughs: 0.50 at twenty hits on 2026-10-25, before the re-cut
+prompts were embedded). Each hit shows a snippet centred on the match. When part of the searched
 scope has no embeddings yet, the search says how much.
 
 ## Design choices, and what they taught
