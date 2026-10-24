@@ -20,7 +20,7 @@ Design: ~/dotfiles/docs/personal_archives_semantic_search_2026_06_10.md § v2.
 """
 from __future__ import annotations
 import os, sys, json, glob, hashlib, argparse, concurrent.futures, time, urllib.request, urllib.error, subprocess
-import re, email, shutil, html as _htmllib
+import math, re, email, shutil, html as _htmllib
 from email import policy as _emailpolicy
 import email.utils as _emailutils
 from pathlib import Path
@@ -139,6 +139,47 @@ def chunk(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP,
         yield idx, text[i:i + size]
         i += step
         idx += 1
+
+#: Lines in a prompt that are not his words: a quoted line of Claude's reply he is answering (`> …`),
+#: the app's reply marker, and an attached file's path.
+_SAID_QUOTE = re.compile(r"^\s*>")
+_SAID_MARKER = re.compile(r"^\s*<!--\s*reply[^>]*-->\s*$")
+_SAID_ATTACHMENT = re.compile(r'@"[^"]+"')
+SAID_MIN_PARAGRAPH = 200
+
+def chunk_said(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP,
+               max_chunks: int = MAX_CHUNKS):
+    """His prompt cut at his own paragraphs (2026-10-25). Fixed 750-character windows cut a prompt
+    mid-word and mixed its topics, so a one-line request inside a long message barely moved the
+    window's vector: a search for his walkthrough requests found about half of them in its top 20.
+    Quoted lines of Claude's reply, the reply markers and attached file paths are dropped, since
+    they are not what he said. Paragraphs shorter than SAID_MIN_PARAGRAPH join the next one; a
+    paragraph longer than `size` falls back to the window chunker."""
+    lines = [_SAID_ATTACHMENT.sub("", ln) for ln in text.splitlines()
+             if not _SAID_QUOTE.match(ln) and not _SAID_MARKER.match(ln)]
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", "\n".join(lines)) if p.strip()]
+    pieces, buf = [], ""
+    for p in paragraphs:
+        if buf and len(buf) + len(p) + 2 > size:
+            pieces.append(buf)
+            buf = ""
+        buf = f"{buf}\n\n{p}" if buf else p
+        if len(buf) >= SAID_MIN_PARAGRAPH:
+            pieces.append(buf)
+            buf = ""
+    if buf:
+        if pieces and len(pieces[-1]) + len(buf) + 2 <= size:
+            pieces[-1] = f"{pieces[-1]}\n\n{buf}"
+        else:
+            pieces.append(buf)
+    idx = 0
+    for piece in pieces:
+        windows = [piece] if len(piece) <= size else [c for _, c in chunk(piece, size, overlap)]
+        for w in windows:
+            if idx >= max_chunks:
+                return
+            yield idx, w
+            idx += 1
 
 def _single_chunk(text: str):
     """Chunker that yields the whole text as ONE chunk (idx 0). Used for git
@@ -903,7 +944,7 @@ def _said_from_history(seen_sids, path=None):
         source_id, k = f"said:{sid}", 0
         for day, t in items:
             title = t[:80].replace("\x00", "")
-            for _, ch in chunk(t):
+            for _, ch in chunk_said(t):
                 ch = ch.replace("\x00", "")
                 yield (f"{source_id}#{k}", "said", source_id, k, proj, title, ch, day, day, h(ch))
                 k += 1
@@ -968,7 +1009,7 @@ def discover_said():
                         if any(mark in t for mark in _NOISE) or any(mark in t for mark in _NOT_HIS):
                             continue
                         title = t[:80].replace("\x00", "")
-                        for _, ch in chunk(t):
+                        for _, ch in chunk_said(t):
                             ch = ch.replace("\x00", "")
                             yield (f"{source_id}#{k}", "said", source_id, k, proj,
                                    title, ch, created, created, h(ch))
@@ -2439,6 +2480,8 @@ DEFAULT_EXCLUDED_KINDS = ("email", "said")
 #: index is used, and scores the returned rows at full precision.
 HALFVEC_ORDER = f"embedding::halfvec({EMBED_DIM})"
 
+SOFT_TERM_WEIGHT = 0.35
+
 def _soft_tsquery(term: str) -> str:
     """Prefix-expand a soft term when it is long enough to be discriminating."""
     if SOFT_PREFIX and len(term) >= SOFT_PREFIX_MIN_CHARS:
@@ -2477,7 +2520,7 @@ def _recency01(datestr: str) -> float:
     days_ago = max(0.0, (time.time() - t) / 86400.0)
     return max(0.0, 1.0 - days_ago / RECENCY_WINDOW_DAYS)
 
-def _fuse_ranked(results, limit: int):
+def _fuse_ranked(results, limit: int, hashes=None):
     for x in results.values():
         score = x.get("kw_rrf", 0.0)
         if x.get("kw_rank") and not x.get("kw_rrf"):
@@ -2495,10 +2538,19 @@ def _fuse_ranked(results, limit: int):
                     reverse=True)
     out = []
     seen_sources = set()
+    seen_texts = set()
+    hashes = hashes or {}
     for x in ranked:
         source_id = str(x["r"][0]).rsplit("#", 1)[0]
         if source_id in seen_sources:
             continue
+        # The same text held twice (a forked or resumed session copies his earlier prompts into
+        # its own file; 617 of his prompt texts were held more than once on 2026-10-25) shows once.
+        text_hash = hashes.get(x["r"][0])
+        if text_hash and text_hash in seen_texts:
+            continue
+        if text_hash:
+            seen_texts.add(text_hash)
         seen_sources.add(source_id)
         out.append(x)
         if len(out) >= limit:
@@ -2554,13 +2606,20 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
     for rank, r in enumerate(cur.fetchall(), 1):
         _add_keyword_result(results, r, rank, weight=1.6)
 
+    # Each soft term weighs by how rare it is where the search looks (2026-10-25): a word matching
+    # the whole capped candidate set (make, walk, audio in his prompts) weighs half of
+    # SOFT_TERM_WEIGHT, the rarest one and a half. Every soft term used to weigh the same, so a
+    # seven-word question gave a chunk a vote for each common word it shared. Splitting one weight
+    # evenly across the terms was tried first and lowered prior-art MRR from 0.61 to 0.54, since it
+    # weakened the one rare word a long question hinges on as much as the common ones.
     for term in _soft_terms(q):
         # Rank a BOUNDED candidate set, not every match — see
         # SEARCH_SOFT_CANDIDATE_CAP for the measurements and why precision holds.
         tsq = _soft_tsquery(term)
         cur.execute(
             f"""SELECT id,source_kind,project,title,{SNIPPET_SQL},created,
-                       ts_rank(tsv, to_tsquery('simple',%s)) AS rank,updated
+                       ts_rank(tsv, to_tsquery('simple',%s)) AS rank,updated,
+                       count(*) OVER () AS df
                 FROM (SELECT id,source_kind,project,title,text,created,tsv,updated
                       FROM chunks
                       WHERE tsv @@ to_tsquery('simple',%s){where_scope}
@@ -2569,8 +2628,14 @@ def _keyword_results(cur, q: str, where_scope: str, params_scope: list):
                 LIMIT %s""",
             [q, tsq, tsq, *params_scope, SEARCH_SOFT_CANDIDATE_CAP,
              tsq, SEARCH_SOFT_PER_TERM_LIMIT])
-        for rank, r in enumerate(cur.fetchall(), 1):
-            _add_keyword_result(results, r, rank, weight=0.35)
+        rows = cur.fetchall()
+        if not rows:
+            continue
+        df = rows[0][8]
+        rarity = math.log((SEARCH_SOFT_CANDIDATE_CAP + 1) / (df + 1)) / math.log(SEARCH_SOFT_CANDIDATE_CAP + 1)
+        weight = SOFT_TERM_WEIGHT * (0.5 + rarity)
+        for rank, r in enumerate(rows, 1):
+            _add_keyword_result(results, r[:8], rank, weight=weight)
     return results
 
 def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, conn=None,
@@ -2635,7 +2700,15 @@ def search_results(q: str, scope=None, projects=None, keyword=False, limit=12, c
                                     "kwscore": 0.0, "sem_rank": rank}
         except Exception as e:
             print(f"(semantic layer skipped: {e})", file=sys.stderr)
-    ranked = _fuse_ranked(results, limit)
+    hashes = {}
+    if results:
+        try:
+            cur.execute("SELECT id, content_hash FROM chunks WHERE id = ANY(%s) "
+                        "AND source_kind <> ALL(%s)", [list(results), ["code", "git_commit"]])
+            hashes = dict(cur.fetchall())
+        except Exception as e:
+            print(f"(duplicate check skipped: {e})", file=sys.stderr)
+    ranked = _fuse_ranked(results, limit, hashes)
     if owned:
         conn.close()
     return ranked

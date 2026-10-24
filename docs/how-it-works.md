@@ -33,14 +33,20 @@ query needs one database and nothing to keep in sync.
 **Embed.** Qwen3-Embedding-4B, served through llama.cpp's OpenAI-compatible endpoint from a
 GTX 1650 in a home server. Large backfills run on a borrowed workstation GPU when its owner is
 not using it (`z4/`). Nothing is sent to a cloud service. A query gets an instruction prefix;
-stored chunks are embedded as plain text. A chunk too dense for the server's context window is
+stored chunks are embedded as plain text. What was typed in Claude Code (`said`) is cut at its
+own paragraphs, short ones joined, with quoted lines of the answer being replied to and attached
+file paths left out, since those words were not typed (2026-10-25; a fixed 750-character window
+had started pieces mid-word and mixed the quote into the vector). A chunk too dense for the server's context window is
 truncated and retried rather than dropped, and a batch that fails is split until the one bad
 item is isolated.
 
 **Search.** Keyword passes run first: an exact-phrase match for short queries, a search on all
 the terms, and a small probe per term. A vector search runs beside them. The ranked lists are
 merged with reciprocal rank fusion and de-duplicated per document, so one long conversation
-cannot fill the page. Each hit shows a snippet centred on the match. When part of the searched
+cannot fill the page; identical text from two documents (a resumed session repeating a prompt)
+shows once. A per-term probe counts by how rare the term is, so *make* or *walk* in a long
+question no longer outvotes the words that carry it (2026-10-25: precision on a walkthrough
+question rose from 0.30 to 0.50 at twenty hits, `eval/said_precision.py`). Each hit shows a snippet centred on the match. When part of the searched
 scope has no embeddings yet, the search says how much.
 
 ## Design choices, and what they taught
