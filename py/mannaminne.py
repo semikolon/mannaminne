@@ -332,9 +332,11 @@ def discover_aichat():
 
 #: The Facebook group "Collaborative Argumentation Analysis" (2011 to 2013, the first
 #: public home of what became Deliberus), from the archive the Deliberus repository
-#: keeps in data/fb_group_archive/<scrape-date>_archive.json: 406 posts and 1,956
-#: comments by 143 people, scraped 2026-03-27. One source per post, its comments
-#: under it. Facebook showed only a relative age per post ("13y") and nothing on a
+#: keeps in data/fb_group_archive/<scrape-date>_archive.json, one file per scrape.
+#: Every file is read in date order and the newest copy of a post wins, so the full
+#: re-read of 2026-10-23 (comments uncapped, two 2012 page saves folded in) replaces
+#: the March scrape's copies, which held about ten comments a post. One source per
+#: post, its comments under it. Facebook showed only a relative age per post ("13y") and nothing on a
 #: comment, so a post's `created` is the LATEST date it can have (the scrape date
 #: minus that many years) and the header gives the year-wide range. A post the scraper
 #: re-visited since 2026-10-22 carries `date`, read off the post's own header, and that
