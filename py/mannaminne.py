@@ -400,6 +400,141 @@ def discover_fbgroup():
         yield from _rows("fbgroup", f"fbgroup:{pid}", "deliberus", title, full, created)
 
 
+#: Chats kept outside Messenger and mail: Adium's logs (ICQ, Google Talk, MSN, Facebook
+#: chat, IRC, 2010 and 2011) and Skype's own databases (October 2012 to 2018), copied off
+#: the archive drive into CHAT_ARCHIVE so the nightly run never depends on it being
+#: mounted (provenance in its README). Added 2026-10-25 at his request ("Index this all
+#: intelligently in mannaminne!!"). One source per conversation per day, dated that day:
+#: the Messenger kind keeps a whole thread as one source carrying only its newest date,
+#: so a chat of 2010 there reads as 2019. The Skype databases overlap at their seam, so a
+#: message is kept once by (conversation, time, author, text).
+CHAT_ARCHIVE = os.environ.get("MANNAMINNE_CHAT_ARCHIVE",
+                              os.path.join(HOME, "Projects/chat-archives"))
+_ADIUM_PROJECT = {"facebook": "facebook-chat", "gtalk": "gtalk", "icq": "icq", "msn": "msn",
+                  "irc": "irc", "bonjour": "bonjour", "jabber": "jabber"}
+_SKYPE_SAID = (61, 60)                                   # a message, an emote
+_SKYPE_EVENTS = {30: "[call started]", 39: "[call ended]", 68: "[file sent]"}
+_XML_TAG = re.compile(r"<[^>]+>")
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+_ADIUM_MESSAGE = re.compile(r"<message\b([^>]*)>(.*?)</message>", re.S)
+_XML_ATTR = re.compile(r'(\w+)="([^"]*)"')
+_ADIUM_ACCOUNT = re.compile(r'<chat\b[^>]*\baccount="([^"]*)"')
+
+
+def _adium_messages(path):
+    """(account, [(time ISO, sender, alias, text)]) for one Adium .xml log. Read message by
+    message rather than as one XML document, because 28 of the 772 logs are not one: a log
+    Adium appended a second log into, a log cut off mid-write, and logs with a chat pasted
+    as plain text after the end. The pasted text is kept, dated by the log's first message."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError:
+        return "", []
+    out = []
+    for m in _ADIUM_MESSAGE.finditer(raw):
+        attrs = dict(_XML_ATTR.findall(m.group(1)))
+        text = " ".join(_htmllib.unescape(_XML_TAG.sub(" ", m.group(2))).split())
+        if text:
+            out.append((attrs.get("time", ""), attrs.get("sender", ""),
+                        _htmllib.unescape(attrs.get("alias", "")), text))
+    tail = raw.rsplit("</chat>", 1)[1].strip() if "</chat>" in raw else ""
+    if tail and out and not tail.startswith("<"):
+        out.append((out[0][0], "", "(pasted after the log)", " / ".join(
+            line.strip() for line in tail.splitlines() if line.strip())))
+    account = _ADIUM_ACCOUNT.search(raw)
+    return (account.group(1) if account else ""), out
+
+
+def _adium_days(logs_root):
+    """{(service_dir, contact, day): [(time, alias, own, sender, text)]}, and per
+    (service_dir, contact) how often each of the other side's display names occurs."""
+    days, names = {}, {}
+    for f in sorted(glob.glob(os.path.join(logs_root, "*", "*", "*", "*.xml"))):
+        service_dir, contact = os.path.relpath(f, logs_root).split(os.sep)[:2]
+        account, msgs = _adium_messages(f)
+        for t, sender, alias, text in msgs:
+            day = t[:10]
+            if not _ISO_DAY.fullmatch(day):
+                continue
+            days.setdefault((service_dir, contact, day), []).append(
+                (t, alias, sender == account, sender, text))
+            if sender != account and alias:
+                seen = names.setdefault((service_dir, contact), {})
+                seen[alias] = seen.get(alias, 0) + 1
+    return days, names
+
+
+def _skype_days(db_paths):
+    """{(identity, day): [(epoch, 'HH:MM name', text)]} and each conversation's display name,
+    read read-only from Skype's main.db files, each message once across the files."""
+    import sqlite3, datetime as _dt
+    from zoneinfo import ZoneInfo
+    tz, seen, days, names = ZoneInfo("Europe/Stockholm"), set(), {}, {}
+    for db in db_paths:
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+            rows = con.execute(
+                "SELECT c.identity, c.displayname, m.author, m.from_dispname, m.timestamp, "
+                "m.type, m.body_xml FROM Messages m LEFT JOIN Conversations c "
+                "ON c.id = m.convo_id ORDER BY m.timestamp").fetchall()
+            con.close()
+        except Exception as e:
+            print(f"  chat: skipped {db}: {e}", file=sys.stderr)
+            continue
+        for ident, disp, author, from_disp, ts, mtype, body in rows:
+            if not ident or not ts:
+                continue
+            if mtype in _SKYPE_SAID:
+                text = " ".join(_htmllib.unescape(_XML_TAG.sub(" ", body or "")).split())
+            else:
+                text = _SKYPE_EVENTS.get(mtype, "")
+            key = (ident, int(ts), author or "", text)
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            d = _dt.datetime.fromtimestamp(ts, tz)
+            days.setdefault((ident, d.strftime("%Y-%m-%d")), []).append(
+                (ts, f"{d.strftime('%H:%M')} {from_disp or author}", text))
+            if disp:
+                names[ident] = disp
+    return days, names
+
+
+def discover_chat():
+    """One source per conversation per day from Adium's logs and Skype's databases."""
+    logs = os.path.join(CHAT_ARCHIVE, "adium", "Logs")
+    dbs = sorted(glob.glob(os.path.join(CHAT_ARCHIVE, "skype", "*.db")))
+    xml_files = glob.glob(os.path.join(logs, "*", "*", "*", "*.xml"))
+    if not xml_files and not dbs:
+        return
+    _skip_if_unchanged("chat", xml_files + dbs)
+    days, names = _adium_days(logs)
+    for (service_dir, contact, day), msgs in sorted(days.items()):
+        service = service_dir.split(".")[0]
+        kind = "facebook" if "chat.facebook.com" in service_dir else service.lower()
+        counts = names.get((service_dir, contact), {})
+        who = max(counts, key=counts.get) if counts else contact
+        if kind == "irc" and contact.startswith("#"):
+            who = f"IRC {contact}"
+        msgs.sort(key=lambda m: m[0])
+        title = f"Adium {service} · {who} · {day}"
+        # A message Adium saved without a display name is named by its side of the chat.
+        full = title + "\n" + "\n".join(
+            f"{t[11:16]} {alias or (sender if own else who)}: {text}"
+            for t, alias, own, sender, text in msgs)
+        yield from _rows("chat", f"chat:adium:{service_dir}:{contact}:{day}",
+                         _ADIUM_PROJECT.get(kind, kind), title, full, day)
+    sdays, snames = _skype_days(dbs)
+    for (ident, day), msgs in sorted(sdays.items()):
+        msgs.sort(key=lambda m: m[0])
+        title = f"Skype · {snames.get(ident) or ident} · {day}"
+        full = title + "\n" + "\n".join(f"{name}: {text}" for _, name, text in msgs)
+        yield from _rows("chat", f"chat:skype:{ident}:{day}", "skype", title, full, day)
+
+
 #: Ruby, the voice assistant in the TTS daemon, logs every exchange here: what Fredrik said and
 #: what she answered, from 2026-01-16. Added 2026-10-23 at his request ("It should. It could also
 #: index her replies."), because nothing else in the index holds what he said aloud.
@@ -1781,7 +1916,7 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "email": discover_email, "things3": discover_things3, "fyr": discover_fyr,
        "screenshot": discover_screenshots, "git_commit": discover_git_commits,
        "code": discover_code, "said": discover_said, "fbgroup": discover_fbgroup,
-       "ruby": discover_ruby}
+       "ruby": discover_ruby, "chat": discover_chat}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -2822,7 +2957,7 @@ def cmd_search(args):
            "things3": "\033[93m[things3]", "fyr": "\033[91m[fyr]",
            "screenshot": "\033[96m[shot]", "git_commit": "\033[92m[commit]",
            "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]",
-           "ruby": "\033[91m[ruby]"}
+           "ruby": "\033[91m[ruby]", "chat": "\033[35m[chat]"}
     for i, x in enumerate(ranked, 1):
         r = x["r"]
         kw = " \033[32m[kw]\033[0m" if x["kw"] else ""
@@ -2990,7 +3125,8 @@ def cmd_stats(args):
 def _scope(args):
     flags = []
     for k in ("session", "doc", "messenger", "aichat", "note", "email",
-              "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup", "ruby"):
+              "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup", "ruby",
+              "chat"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
@@ -3036,6 +3172,9 @@ def _add_search_args(sp):
     sp.add_argument("--fbgroup", action="store_true",
                     help="the 2011-2013 Facebook group (Collaborative Argumentation Analysis), "
                          "one source per post with its comments")
+    sp.add_argument("--chat", action="store_true",
+                    help="Skype (2012-2018) and Adium (ICQ, Google Talk, MSN, Facebook chat, IRC; "
+                         "2010-2011), one source per conversation per day")
     sp.add_argument("--ruby", action="store_true",
                     help="what Fredrik said to Ruby, the voice assistant, and what she answered "
                          "(from 2026-01-16)")
