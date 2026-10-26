@@ -1,69 +1,44 @@
-﻿# embed_guard_local.ps1 â€” Z4-side lifecycle manager for the mannaminne embed server.
+﻿# embed_guard_local.ps1 - lifecycle manager for the embedding server on a borrowed workstation.
 #
-# Runs llama-server (Qwen3-Embedding-4B-Q4_K_M, ~3-4 GB VRAM) serving an
-# OpenAI-compat /v1/embeddings endpoint, and CEDES the GPU by KILLING the server
-# (which fully frees its VRAM â€” satisfies the brf-auto "unload != pause" contract).
-# The Mac client (mannaminne embed) streams the backlog and retries while the
-# server is down; the backlog is idempotent (WHERE embedding IS NULL) so a cede
-# loses at most the in-flight batch.
+# Runs llama-server (Qwen3-Embedding-4B-Q4_K_M, ~3-4 GB VRAM) serving an OpenAI-compatible
+# /v1/embeddings endpoint, and CEDES the GPU by KILLING the server, which frees its VRAM completely
+# (a paused server would still hold it). The client streams the backlog and retries while the server is
+# down; the backlog is idempotent, so a cede loses at most the batch in flight.
 #
-# Cede triggers (kill llama-server, free VRAM):
-#   (a) E:\z4-coord\gpu-preempt.flag present & fresh  -> a higher-priority job wants the GPU
-#   (b) Revit GPU memory jumps > RevitJumpMB while we run -> the owner doing heavy GPU work
-#   (c) [idle-window mode only, CarveOut=0] console idle < CedeIdleSec -> the owner active
+# Cede (kill the server) when:
+#   (a) E:\z4-coord\gpu-preempt.flag is present and fresh: a higher-priority job wants the GPU;
+#   (b) owner_busy.ps1 says the owner is using the machine: console unlocked, a remote-desktop peer
+#       connected, or (locked) a CAD program doing sustained work. Fails closed.
+# Start again only after the owner has been away -ResumeQuietMin minutes (stop at once, resume slowly).
 #
-# The model is small (~3-4 GB) so it fits the active-GPU-idle CARVE-OUT
-# (Fredrik both-YES, 2026-06-12): in CarveOut=1 it may run while the owner is active,
-# ceding only on the flag or a real Revit GPU spike. Revit baseline is re-tracked
-# whenever we are NOT running, so a permanent false-cede can't happen.
+# History: process presence (an open Revit blocked the backlog for 20 minutes, 2026-08-25), then CAD CPU
+# time alone at 0.15 CPU-s/s (ceded 72 times one night against an idle Revit's 0.05-0.12), then this
+# (2026-10-26). quser console-idle and per-process GPU memory are both unusable on this machine.
 param(
   [string]$Server     = "E:\llama-embed\llama-server.exe",
   [string]$Model      = "E:\llama-embed\Qwen3-Embedding-4B-Q4_K_M.gguf",
   [int]$Port          = 8081,
   [string]$Flag       = "E:\z4-coord\gpu-preempt.flag",
   [int]$FlagStaleMin  = 15,
-  [int]$RevitJumpMB   = 600,
-  [int]$CarveOut      = 1,      # 1 = may run while the owner active (cede on flag/Revit only); 0 = idle-window only
-  [int]$LaunchIdleMin = 20,     # used when CarveOut=0
-  [int]$CedeIdleSec   = 90,     # used when CarveOut=0
   [double]$PollSec    = 2.0,
   [int]$MaxMin        = 1440,
+  [int]$ResumeQuietMin = 5,     # after an owner cede, restart only once the owner has been away this long
   [switch]$DryRun
 )
-$qs  = "E:\llama-embed\quser_idle.ps1"
 $log = "E:\llama-embed\embed_guard.log"
 function Now(){ [DateTime]::Now.ToString('o') }
 function Log($m){ "$(Now) $m" | Add-Content $log }
-function IdleSec(){ try { [int](& $qs) } catch { 0 } }
-function CadWorking(){
-  # Is the owner ACTUALLY working, or is a CAD window merely open? Presence ceded for
-  # 20 minutes straight on 2026-08-25 with Revit idle, blocking the backlog.
-  # Per-process CPU time answers the real question and, unlike GPU utilisation,
-  # survives contention from our own server â€” so it guards the whole run, not
-  # just the decision to start. Fails CLOSED: any error cedes.
+function OwnerBusy(){
+  # Is the owner using the machine, at the desk or remotely? owner_busy.ps1 (2026-10-26): console unlocked,
+  # a remote-desktop peer connected, or (when locked) a CAD program doing sustained work. Replaced the
+  # CAD-only CPU check, whose 0.15 threshold sat just above an idle Revit's 0.05-0.12 and ceded 72 times one
+  # night with nobody there. Fails CLOSED: any error cedes. Sets $script:OwnerReason for the log.
   try {
-    $r = & powershell -NoProfile -ExecutionPolicy Bypass -File 'E:\llama-embed\cad_working.ps1'
-    return ($LASTEXITCODE -eq 0)
-  } catch { return $true }
-}
-function NightWindowUnused(){
-  # Between 01:00-07:00 an OPEN Revit is not WORK: the guard cedes on presence,
-  # so an idle Revit left overnight blocks the backlog forever (measured
-  # 2026-08-25). The preempt-flag cede is never overridden by this.
-  $h = [int](Get-Date).Hour
-  return ($h -ge 1 -and $h -lt 7)
-}
-function CadPresent(){
-  # Is the owner doing local CAD work? Detect by PROCESS PRESENCE (Revit/AutoCAD running), since
-  # per-process GPU memory reads [N/A] on this A4000 (memory-jump detection is impossible) and
-  # quser console-idle is unreliable here (shows "active" for hours after he leaves).
-  # NOTE: Parsec-background is deliberately NOT included â€” parsecd is GPU-present even when the owner
-  # isn't connected; active-Parsec disruption is handled by the operator + the 45-min health loop.
-  try {
-    $rows = nvidia-smi --query-compute-apps=process_name --format=csv,noheader 2>$null
-    foreach($r in $rows){ if($r -match 'Revit|acad'){ return $true } }
-    $false
-  } catch { $false }
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File 'E:\llama-embed\owner_busy.ps1'
+    $code = $LASTEXITCODE
+    try { $script:OwnerReason = ($out | ConvertFrom-Json).reason } catch { $script:OwnerReason = 'owner-busy' }
+    return ($code -ne 1)
+  } catch { $script:OwnerReason = 'owner check failed'; return $true }
 }
 function FlagFresh(){
   if(-not (Test-Path $Flag)){ return $false }
@@ -78,7 +53,7 @@ function StartServer(){
   Log "START llama-server :$Port"
   if($DryRun){ Log "DRYRUN would-start"; return }
   # A4000 throughput config (vs Darwin's GTX-1650 batch-of-2/single-stream): 4 parallel
-  # slots + room for batched requests. Throughput-only â€” same GGUF/pooling => same-space.
+  # slots + room for batched requests. Throughput only: same GGUF and pooling, so the same vector space.
   Start-Process -FilePath $Server -WindowStyle Hidden -ArgumentList @(
     "--model",$Model,"--embedding","--host","0.0.0.0","--port","$Port",
     "-ngl","99","--parallel","4","--ctx-size","8192","--batch-size","4096","--ubatch-size","4096",
@@ -92,18 +67,22 @@ function StopServer($why){
   if($DryRun){ Log "DRYRUN would-kill"; return }
   $p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
 }
-Log "guard start (carveout=$CarveOut, dryrun=$DryRun)"
+$script:LastOwnerBusy = $null
+$script:OwnerReason = ''
+Log "guard start (dryrun=$DryRun, resume-quiet=${ResumeQuietMin}min)"
 $end = (Get-Date).AddMinutes($MaxMin)
 try {
   while((Get-Date) -lt $end){
-    $idle = IdleSec
     $cede = $null
     if(FlagFresh){ $cede = "preempt-flag" }              # a higher-priority Z4 job wants the GPU
-    elseif((CadPresent) -and (CadWorking)){ $cede = "cad-working" }         # Revit/AutoCAD running => the owner on local CAD
-    elseif($CarveOut -eq 0 -and $idle -lt $CedeIdleSec){ $cede = "idle=${idle}s" }
+    elseif(OwnerBusy){ $cede = "owner: $script:OwnerReason"; $script:LastOwnerBusy = Get-Date }
     if($cede){ StopServer $cede; Start-Sleep -Seconds $PollSec; continue }
-    $okToRun = ($CarveOut -eq 1) -or ($idle -ge ($LaunchIdleMin*60))
-    if($okToRun){ StartServer } else { StopServer "preflight-idle=${idle}s" }
+    # Stop at once, start again only after a quiet spell (HTCondor's shape): no restart churn while he
+    # comes and goes, and no loaded model waiting when he sits back down.
+    if($script:LastOwnerBusy -and ((Get-Date) - $script:LastOwnerBusy).TotalMinutes -lt $ResumeQuietMin){
+      Start-Sleep -Seconds $PollSec; continue
+    }
+    StartServer
     Start-Sleep -Seconds $PollSec
   }
 } finally {
