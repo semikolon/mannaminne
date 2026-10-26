@@ -4,12 +4,12 @@ $ob = 'E:\llama-embed\owner_busy.ps1'
 '[I 2026-10-26 14:00:00] Someone#1 connected.' | Set-Content $env:TEMP\fake_parsec_on.txt
 "[I 2026-10-26 14:00:00] Someone#1 connected.`n[I 2026-10-26 14:05:00] Someone#1 disconnected." | Set-Content $env:TEMP\fake_parsec_off.txt
 $cases = @(
-  @('unlocked',  '$env:TEMP\fake_parsec_off.txt', 0.5,  'busy'),
-  @('locked',    '$env:TEMP\fake_parsec_on.txt',  0.5,  'busy'),
-  @('locked',    '$env:TEMP\fake_parsec_off.txt', 0.5,  'free'),
-  @('locked',    '$env:TEMP\missing.txt',         0.5,  'free'),
-  @('unknown',   '$env:TEMP\fake_parsec_off.txt', 0.5,  'free'),
-  @('locked',    '$env:TEMP\fake_parsec_off.txt', 0.01, 'busy')
+  @('unlocked',  "$env:TEMP\fake_parsec_off.txt", 0.5,  'busy'),
+  @('locked',    "$env:TEMP\fake_parsec_on.txt",  0.5,  'busy'),
+  @('locked',    "$env:TEMP\fake_parsec_off.txt", 0.5,  'free'),
+  @('locked',    "$env:TEMP\missing.txt",         0.5,  'free'),
+  @('unknown',   "$env:TEMP\fake_parsec_off.txt", 0.5,  'free'),
+  @('locked',    "$env:TEMP\fake_parsec_off.txt", 0.01, 'busy')
 )
 foreach ($c in $cases) {
   $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $ob -AssumeLock $c[0] -ParsecLogs $c[1] -LockedRatio $c[2]
