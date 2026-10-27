@@ -6,8 +6,12 @@
 # BOINC, Deadline and Salad yield to a desktop's owner):
 #   1. The console session is UNLOCKED -> busy. This machine locks five minutes after the last input, so an
 #      unlocked session means someone has been there within minutes, whatever program they use (mail, web,
-#      CAD). Read with WTSQuerySessionInformation(WTSSessionInfoEx).SessionFlags, which works from session 0
-#      (a service or SSH), unlike GetLastInputInfo or quser idle, which both measured wrong here.
+#      CAD). Read as: no LogonUI.exe in the console session. LogonUI runs while a session is locked (or
+#      disconnected, which also means nobody is at the console) and exits on unlock. Corrected 2026-10-27:
+#      until then this read WTSQuerySessionInformation(WTSSessionInfoEx).SessionFlags, which returned 0
+#      ("locked") in every reading, including a whole morning of CAD work at the console with no LogonUI
+#      running. The flag is still logged, for comparison. GetLastInputInfo and quser idle both measured
+#      wrong here too.
 #   2. A remote-desktop peer is CONNECTED (the Parsec host log's last "<peer> connected/disconnected" line)
 #      -> busy. The owner works remotely now and then; the stream needs the GPU.
 #   3. Locked and nobody connected: busy only if a CAD program is doing sustained work (a render or export
@@ -35,9 +39,9 @@ function Out-Verdict([bool]$busy, [string]$reason, [hashtable]$extra) {
   ($o | ConvertTo-Json -Compress)
   if ($LogCsv) {
     try {
-      if (-not (Test-Path $LogCsv)) { 'at,busy,reason,lock,peer,cad_ratio' | Set-Content $LogCsv }
+      if (-not (Test-Path $LogCsv)) { 'at,busy,reason,lock,peer,cad_ratio,wts_flags' | Set-Content $LogCsv }
       $ci = [Globalization.CultureInfo]::InvariantCulture
-      [string]::Format($ci, '{0},{1},{2},{3},{4},{5}', $o.at, [int]$busy, $reason, $extra.lock, $extra.peer, $extra.cad_ratio) | Add-Content $LogCsv
+      [string]::Format($ci, '{0},{1},{2},{3},{4},{5},{6}', $o.at, [int]$busy, $reason, $extra.lock, $extra.peer, $extra.cad_ratio, $extra.wts_flags) | Add-Content $LogCsv
     } catch {}
   }
   if ($busy) { exit 0 } else { exit 1 }
@@ -66,9 +70,9 @@ public static class OwnerWts {
 
   $sid = [OwnerWts]::WTSGetActiveConsoleSessionId()
   $user = if ($sid -ge 0 -and $sid -ne -1) { [OwnerWts]::User($sid) } else { $null }
-  $flags = if ($sid -ge 0) { [OwnerWts]::Flags($sid) } else { -2 }
-  # SessionFlags: 0 = locked, 1 = unlocked (reversed only on Windows 7 / 2008 R2), -1 = unknown
-  $lock = if ($AssumeLock) { $AssumeLock } elseif (-not $user) { 'nobody' } elseif ($flags -eq 0) { 'locked' } elseif ($flags -eq 1) { 'unlocked' } else { 'unknown' }
+  $flags = if ($sid -ge 0) { [OwnerWts]::Flags($sid) } else { -2 }   # logged only; read wrong here (header)
+  $logonUi = @(Get-Process -Name LogonUI -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid })
+  $lock = if ($AssumeLock) { $AssumeLock } elseif (-not $user) { 'nobody' } elseif ($logonUi.Count -gt 0) { 'locked' } else { 'unlocked' }
 
   # Remote-desktop peer: the last connect/disconnect line in the Parsec host log (and its rotated copy).
   $peer = 'none'
@@ -77,7 +81,7 @@ public static class OwnerWts {
     if ($m) { $peer = if ($m.Matches[0].Groups[1].Value -eq 'connected') { 'connected' } else { 'none' }; break }
   }
 
-  $info = @{ lock = $lock; peer = $peer; cad_ratio = '' }
+  $info = @{ lock = $lock; peer = $peer; cad_ratio = ''; wts_flags = $flags }
   if ($lock -eq 'unlocked') { Out-Verdict $true 'console unlocked' $info }
   if ($peer -eq 'connected') { Out-Verdict $true 'remote desktop connected' $info }
 
@@ -107,5 +111,5 @@ public static class OwnerWts {
   }
   Out-Verdict $false "$lock; CAD idle" $info
 } catch {
-  Out-Verdict $true ('check failed: ' + $_.Exception.Message) @{ lock = 'error'; peer = ''; cad_ratio = '' }
+  Out-Verdict $true ('check failed: ' + $_.Exception.Message) @{ lock = 'error'; peer = ''; cad_ratio = ''; wts_flags = '' }
 }

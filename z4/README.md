@@ -29,10 +29,13 @@ What was learned building it:
 - **But CAD CPU time alone has a thin margin and a blind spot.** Two idle Revit
   windows used 0.05-0.12 CPU-seconds per second against a 0.15 threshold, which
   ceded 72 times in one night with nobody there; and it cannot see the owner
-  reading mail at the desk or working remotely. The session's lock state, read
-  from session 0 with `WTSQuerySessionInformation(WTSSessionInfoEx)`, and the
-  remote-desktop host's own connect/disconnect log cover both, so the CAD
+  reading mail at the desk or working remotely. The session's lock state (whether
+  `LogonUI.exe` runs in the console session) and the remote-desktop host's own
+  connect/disconnect log cover both, so the CAD
   threshold only has to catch work left running while the machine is locked.
+- **The documented lock flag read wrong here.** `WTSQuerySessionInformation`
+  with `WTSSessionInfoEx` returned *locked* for a whole morning of CAD work at the
+  console; whether `LogonUI.exe` runs is the reading that matched what happened.
 - **Stop at once, start slowly.** After a cede the guard waits for a quiet spell
   before restarting, the shape HTCondor's desktop policy uses.
 - **GPU load barely shows CAD work.** In about 2,100 minutes of journalled CAD
