@@ -337,6 +337,81 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIn("date not captured", empty[6])
         self.assertIn("(link or photo post; the text was not captured)", empty[6])
 
+    def _moj(self, s):
+        return s.encode("utf-8").decode("latin1")     # how Meta's JSON export writes text
+
+    def _messenger_thread(self, base, folder, other, messages):
+        d = Path(base, folder)
+        d.mkdir(parents=True)
+        Path(d, "message_1.json").write_text(json.dumps({
+            "participants": [{"name": self._moj(other)}, {"name": self._moj("Fredrik Bränström")}],
+            "title": self._moj(other),
+            "messages": [{"sender_name": self._moj(s), "timestamp_ms": ts, "content": self._moj(c)}
+                         for s, ts, c in messages]}), encoding="utf-8")
+
+    def test_discover_messenger_reads_a_thread_once_from_the_newer_download(self):
+        # His own words from the 2026 download; the other side is invented (public repo).
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            old, new = Path(d, "old/inbox"), Path(d, "new/messages")
+            self._messenger_thread(old, "adalund_77", "Ada Lund",
+                                   [("Fredrik Bränström", 1500000000000, "Hej, försökte nå dig i går")])
+            self._messenger_thread(new / "e2ee_cutover", "adalundqvist_77", "Ada Lundqvist",
+                                   [("Fredrik Bränström", 1718302726000, "Får inte igång ljudet på datorn, hör av mig sen"),
+                                    ("Fredrik Bränström", 1500000000000, "Hej, försökte nå dig i går")])
+            self._messenger_thread(new / "inbox", "boek_88", "Bo Ek",
+                                   [("Bo Ek", 1718302700000, "haha")])
+            self._messenger_thread(old, "cia_99", "Cia Holm",
+                                   [("Cia Holm", 1400000000000, "hej")])
+            old_fp = m._FINGERPRINT_FILE
+            m._FINGERPRINT_FILE = str(Path(d) / "fp.json")
+            try:
+                with mock.patch.dict(os.environ, {"MANNAMINNE_MESSENGER_DIR": str(old),
+                                                  "MANNAMINNE_MESSENGER_NEWER_DIR": str(new)}):
+                    rows = list(m.discover_messenger())
+            finally:
+                m._FINGERPRINT_FILE = old_fp
+                m._PENDING_FINGERPRINTS.pop("messenger", None)
+        by_sid = {r[2]: r for r in rows}
+        # The thread in both keeps its 2023 source id, so its rows are replaced, not doubled.
+        self.assertEqual(set(by_sid), {"msg:adalund_77", "msg:boek_88", "msg:cia_99"})
+        ada = by_sid["msg:adalund_77"]
+        self.assertIn("Får inte igång ljudet på datorn, hör av mig sen", ada[6])
+        self.assertEqual(ada[5], "Ada Lundqvist")
+        self.assertEqual(ada[7], "2024-06-13")
+
+    def test_discover_facebook_one_source_per_kind_and_day(self):
+        # His own posts and comment, copied from the 2026 download's activity files.
+        import tempfile
+        status = ("Åkte förbi sjön i morse och isen hade börjat lägga sig. Räknar med "
+                 "\"skridskoväder\" om en vecka, så länge det håller i sig.")
+        with tempfile.TemporaryDirectory() as d:
+            act = Path(d, "activity")
+            act.mkdir()
+            Path(act, "posts.json").write_text(json.dumps([
+                {"timestamp": 1464444088, "title": self._moj("Fredrik Bränström updated his status."),
+                 "text": self._moj(status)},
+                {"timestamp": 1464444999, "title": self._moj("Fredrik Bränström shared a link."),
+                 "text": "https://example.org/"}]), encoding="utf-8")
+            Path(act, "comments.json").write_text(json.dumps([
+                {"timestamp": 1464444088, "title": self._moj("Fredrik Bränström commented on Ada Lund's post."),
+                 "text": self._moj("Får jag dela vidare det här?")}]), encoding="utf-8")
+            old_fp = m._FINGERPRINT_FILE
+            m._FINGERPRINT_FILE = str(Path(d) / "fp.json")
+            try:
+                with mock.patch.dict(os.environ, {"MANNAMINNE_FACEBOOK_ACTIVITY_DIR": str(act)}):
+                    rows = list(m.discover_facebook())
+            finally:
+                m._FINGERPRINT_FILE = old_fp
+                m._PENDING_FINGERPRINTS.pop("facebook", None)
+        by_sid = {r[2]: r for r in rows}
+        self.assertEqual(set(by_sid), {"facebook:posts:2016-05-28", "facebook:comments:2016-05-28"})
+        posts = by_sid["facebook:posts:2016-05-28"]
+        self.assertEqual((posts[1], posts[4], posts[7]), ("facebook", "facebook", "2016-05-28"))
+        self.assertIn("updated his status.\n" + status[:40], posts[6])
+        self.assertIn("https://example.org/", posts[6])
+        self.assertIn("Får jag dela vidare", by_sid["facebook:comments:2016-05-28"][6])
+
     def test_discover_ruby_one_source_per_thread_with_both_voices(self):
         # Copied from ~/.claude/logs/ruby_conversations.jsonl (the first line, a backfill whose
         # reply was kept only as a size note, and the 2026-07-03 bedroom test), chosen because

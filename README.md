@@ -27,7 +27,8 @@ claim that something is new, was never tried, or does not exist.
 | Kind | What |
 |---|---|
 | `email` | a live Gmail account, plus older mailbox archives |
-| `messenger` | Facebook Messenger history |
+| `messenger` | Facebook Messenger history, 2007 to October 2026, from two data downloads (2023 JSON, 2026 HTML converted to the same JSON); a thread in both is read from the newer and keeps its first source id |
+| `facebook` | my own Facebook posts and comments, also in groups, 2007 on, from the 2026 download; one source per kind and day |
 | `aichat` | ChatGPT and Claude conversation exports |
 | `note` | Simplenote |
 | `doc` | Markdown and text documents in project folders and notes |
@@ -102,7 +103,7 @@ table, so leaving it out keeps a search in the part that fits in memory; `-e` se
 
 Source flags narrow a search to one or more kinds: `-s` sessions, `-d` docs, `-m` Messenger,
 `-a` AI chats, `--note`, `-e` email, `-t` Things 3, `-f` Fyr, `-p` screenshots, `-g` commits,
-`-c` code, `--fbgroup` the Facebook group, `--ruby` conversations with Ruby, `--chat` Skype and Adium chats, `--said` what I typed in Claude Code (left out of a plain search, since the session
+`-c` code, `--fbgroup` the Facebook group, `--facebook` my own Facebook posts and comments, `--ruby` conversations with Ruby, `--chat` Skype and Adium chats, `--said` what I typed in Claude Code (left out of a plain search, since the session
 rows hold the same words). `-P` (also `--repo`) narrows to named projects; put it last, since it takes several
 names. Invoked as `ccsearch`, the tool searches sessions, docs, commits and code by default.
 

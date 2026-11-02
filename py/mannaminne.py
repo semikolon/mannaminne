@@ -265,13 +265,38 @@ def _doc_dates(path):
     created = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else mtime
     return created, mtime
 
+def _messenger_threads():
+    """(folder to read, source id). Two downloads: October 2023 (JSON) and October 2026
+    (Meta gave HTML only; messenger-archive/convert_html_export.py writes it in the same
+    JSON shape, one folder per kind of thread). A thread in both is read from the newer,
+    which holds every 2023 message (checked thread by thread), and keeps its 2023 source
+    id so its rows are replaced rather than doubled. Threads are matched by the number at
+    the end of the folder name, which stays when a person renames."""
+    old_base = os.environ.get("MANNAMINNE_MESSENGER_DIR") or os.path.join(
+        HOME, "Projects/messenger-archive/your_activity_across_facebook/messages/inbox")
+    new_base = os.environ.get("MANNAMINNE_MESSENGER_NEWER_DIR") or os.path.join(
+        HOME, "Projects/messenger-archive/export_2026-11/messages")
+
+    def num(d):
+        return os.path.basename(d).rsplit("_", 1)[-1]
+
+    old = {num(d): d for d in sorted(glob.glob(os.path.join(old_base, "*"))) if os.path.isdir(d)}
+    out, seen = [], set()
+    for d in sorted(glob.glob(os.path.join(new_base, "*", "*"))):
+        if os.path.isdir(d):
+            n = num(d)
+            seen.add(n)
+            out.append((d, os.path.basename(old[n]) if n in old else os.path.basename(d)))
+    out += [(d, os.path.basename(d)) for n, d in old.items() if n not in seen]
+    files = glob.glob(os.path.join(old_base, "*", "message_*.json")) + \
+        glob.glob(os.path.join(new_base, "*", "*", "message_*.json"))
+    return out, files
+
+
 def discover_messenger():
-    base = Path(HOME) / "Projects/messenger-archive/your_activity_across_facebook/messages/inbox"
-    _skip_if_unchanged("messenger", glob.glob(str(base / "*" / "message_*.json")))
-    for d in sorted(glob.glob(str(base / "*"))):
-        if not os.path.isdir(d):
-            continue
-        tid = os.path.basename(d)
+    threads, files = _messenger_threads()
+    _skip_if_unchanged("messenger", files)
+    for d, tid in threads:
         title, parts, newest = "", [], 0
         for f in sorted(glob.glob(os.path.join(d, "message_*.json"))):
             try:
@@ -291,6 +316,42 @@ def discover_messenger():
             continue
         created = time.strftime("%Y-%m-%d", time.gmtime(newest / 1000)) if newest else ""
         yield from _rows("messenger", f"msg:{tid}", "messenger", title or tid[:60], full, created)
+
+
+_FB_KIND = {"posts": "posts", "comments": "comments", "group_comments": "group comments",
+            "group_posts": "group posts"}
+
+
+def discover_facebook():
+    """His own writing on Facebook, 2007 on: posts, comments on others' posts, and posts
+    and comments in groups, from the download of October 2026 (converted from HTML into
+    activity/<kind>.json by messenger-archive/convert_html_export.py). One source per kind
+    and day, each item as what it was ("commented on X's post.") and its text. Added
+    2026-11-02 at his word: "Vad som helst som kan berika mannaminne för personligt bruk
+    borde integreras." """
+    base = os.environ.get("MANNAMINNE_FACEBOOK_ACTIVITY_DIR") or os.path.join(
+        HOME, "Projects/messenger-archive/export_2026-11/activity")
+    files = sorted(glob.glob(os.path.join(base, "*.json")))
+    _skip_if_unchanged("facebook", files)
+    for f in files:
+        kind = Path(f).stem
+        try:
+            items = json.load(open(f))
+        except Exception:
+            continue
+        days = {}
+        for it in items:
+            ts = it.get("timestamp") or 0
+            day = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else ""
+            days.setdefault(day, []).append(it)
+        for day, its in sorted(days.items()):
+            its.sort(key=lambda x: x.get("timestamp") or 0)
+            body = "\n\n".join(f"{fix_mojibake(x.get('title') or '')}\n{fix_mojibake(x.get('text') or '')}".strip()
+                               for x in its)
+            label = _FB_KIND.get(kind, kind.replace("_", " "))
+            title = f"Facebook {label}, {day or 'undated'}"
+            yield from _rows("facebook", f"facebook:{kind}:{day or 'undated'}", "facebook",
+                             title, f"{title}\n\n{body}", day)
 
 def discover_aichat():
     base = Path(HOME) / "Projects/ai-chat-archives"
@@ -1918,7 +1979,7 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "email": discover_email, "things3": discover_things3, "fyr": discover_fyr,
        "screenshot": discover_screenshots, "git_commit": discover_git_commits,
        "code": discover_code, "said": discover_said, "fbgroup": discover_fbgroup,
-       "ruby": discover_ruby, "chat": discover_chat}
+       "ruby": discover_ruby, "chat": discover_chat, "facebook": discover_facebook}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -2958,7 +3019,7 @@ def cmd_search(args):
            "aichat": "\033[34m[aichat]", "note": "\033[32m[note]", "email": "\033[90m[email]",
            "things3": "\033[93m[things3]", "fyr": "\033[91m[fyr]",
            "screenshot": "\033[96m[shot]", "git_commit": "\033[92m[commit]",
-           "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]",
+           "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]", "facebook": "\033[35m[fb]",
            "ruby": "\033[91m[ruby]", "chat": "\033[35m[chat]"}
     for i, x in enumerate(ranked, 1):
         r = x["r"]
@@ -3128,7 +3189,7 @@ def _scope(args):
     flags = []
     for k in ("session", "doc", "messenger", "aichat", "note", "email",
               "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup", "ruby",
-              "chat"):
+              "chat", "facebook"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
@@ -3174,6 +3235,8 @@ def _add_search_args(sp):
     sp.add_argument("--fbgroup", action="store_true",
                     help="the 2011-2013 Facebook group (Collaborative Argumentation Analysis), "
                          "one source per post with its comments")
+    sp.add_argument("--facebook", action="store_true",
+                    help="his own Facebook posts and comments, 2007 on (one source per kind and day)")
     sp.add_argument("--chat", action="store_true",
                     help="Skype (2012-2018) and Adium (ICQ, Google Talk, MSN, Facebook chat, IRC; "
                          "2010-2011), one source per conversation per day")
