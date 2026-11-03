@@ -22,6 +22,11 @@ param(
   [int]$FlagStaleMin  = 15,
   [double]$PollSec    = 2.0,
   [int]$MaxMin        = 1440,
+  # The guard ends itself at this clock time whatever the Mac does (the next one after it starts). Until
+  # 2026-11-03 it ended only when the Mac stopped it or after MaxMin: on 29 October the Mac's stop never
+  # reached the Z4, and the guard kept starting the server through the owner's day. Daytime runs need the
+  # owner's word; pass a later -EndBy for one.
+  [string]$EndBy      = "06:30",
   [int]$ResumeQuietMin = 5,     # after an owner cede, restart only once the owner has been away this long
   [switch]$DryRun
 )
@@ -69,8 +74,13 @@ function StopServer($why){
 }
 $script:LastOwnerBusy = $null
 $script:OwnerReason = ''
-Log "guard start (dryrun=$DryRun, resume-quiet=${ResumeQuietMin}min)"
 $end = (Get-Date).AddMinutes($MaxMin)
+if($EndBy){
+  $clock = [DateTime]::Today.Add([TimeSpan]::Parse($EndBy))
+  if($clock -le (Get-Date)){ $clock = $clock.AddDays(1) }
+  if($clock -lt $end){ $end = $clock }
+}
+Log "guard start (dryrun=$DryRun, resume-quiet=${ResumeQuietMin}min, ends $($end.ToString('yyyy-MM-dd HH:mm')))"
 try {
   while((Get-Date) -lt $end){
     $cede = $null

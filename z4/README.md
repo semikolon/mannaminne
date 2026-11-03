@@ -38,6 +38,9 @@ What was learned building it:
   console; whether `LogonUI.exe` runs is the reading that matched what happened.
 - **Stop at once, start slowly.** After a cede the guard waits for a quiet spell
   before restarting, the shape HTCondor's desktop policy uses.
+- **The guard ends itself at 06:30** (`-EndBy`), whatever the client does. Once
+  the client's stop could not reach the machine, and the guard kept starting the
+  server through the owner's working day.
 - **GPU load barely shows CAD work.** In about 2,100 minutes of journalled CAD
   work, aggregate GPU use was above 1 % in only 30 % of them.
 - **A benchmark for an embedding server must feed different texts.** Repeating
