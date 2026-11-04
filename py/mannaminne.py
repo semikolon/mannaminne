@@ -800,6 +800,13 @@ def discover_docs():
         for f in glob.glob(str(projects / pat), recursive=True):
             if not any(x in f for x in _DOC_EXCLUDE):
                 files.append((projects, "repo", f))
+    # The life repo keeps its documents in area folders (hem/, boende/, myndigheter/
+    # and so on), not in docs/, so it is walked whole (2026-11-04,
+    # ~/dotfiles/docs/where_things_live_2026-11-04.md). Labelled like any repo.
+    seen = {f for _, _, f in files}
+    for f in _walk_docs(projects / "tillvaro", (".md",)):
+        if f not in seen and not any(x in f for x in _DOC_EXCLUDE):
+            files.append((projects, "repo", f))
     _skip_if_unchanged("doc", [f for _, _, f in files])
     for base, mode, f in files:
         if True:
