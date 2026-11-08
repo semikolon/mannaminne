@@ -1722,6 +1722,48 @@ def _ocr_text(path, cache):
     cache[path] = txt
     return txt
 
+#: The link inbox (added 2026-11-08): links he saves instead of keeping tabs open, written by
+#: `lankar` (`~/.local/bin/lankar`, design `~/dotfiles/docs/tabs_and_links_system_2026-11-08.md`).
+#: `links.jsonl` holds one line per save; `text/<id>.txt` the page's readable text, when it could be
+#: fetched. One source per link, dated from its first save.
+LINKS_DIR = os.path.join(HOME, "Projects/lankar")
+
+
+def discover_links():
+    base = Path(os.environ.get("MANNAMINNE_LINKS_DIR", LINKS_DIR))
+    path = base / "links.jsonl"
+    if not path.exists():
+        return
+    texts = sorted((base / "text").glob("*.txt")) if (base / "text").exists() else []
+    _skip_if_unchanged("link", [str(path)] + [str(t) for t in texts])
+    links = {}
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            lid = r.get("id")
+            if not lid or not r.get("url"):
+                continue
+            cur = links.setdefault(lid, {"url": r["url"], "title": "", "first": r.get("saved_at", ""),
+                                         "last": r.get("saved_at", ""), "contexts": [], "browsers": []})
+            cur["title"] = r.get("title") or cur["title"]
+            cur["last"] = r.get("saved_at") or cur["last"]
+            for key, val in (("contexts", r.get("context")), ("browsers", r.get("browser"))):
+                if val and val not in cur[key]:
+                    cur[key].append(val)
+    for lid, c in links.items():
+        tf = base / "text" / f"{lid}.txt"
+        body = tf.read_text(encoding="utf-8", errors="replace") if tf.exists() else ""
+        head = [c["title"] or c["url"], c["url"],
+                f"Saved {c['first'][:10]} from {', '.join(c['browsers']) or 'unknown'}"
+                + (f" ({'; '.join(c['contexts'])})" if c["contexts"] else "")]
+        yield from _rows("link", f"link:{lid}", "lankar", (c["title"] or c["url"])[:120],
+                         "\n".join(head) + ("\n\n" + body if body else ""),
+                         c["first"][:10], updated=c["last"][:10])
+
+
 def discover_screenshots():
     import json as _json
     # An unmounted FERMI or VOLTA would make this walk emit fewer rows, or rows
@@ -1986,7 +2028,8 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "email": discover_email, "things3": discover_things3, "fyr": discover_fyr,
        "screenshot": discover_screenshots, "git_commit": discover_git_commits,
        "code": discover_code, "said": discover_said, "fbgroup": discover_fbgroup,
-       "ruby": discover_ruby, "chat": discover_chat, "facebook": discover_facebook}
+       "ruby": discover_ruby, "chat": discover_chat, "facebook": discover_facebook,
+       "link": discover_links}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -3027,7 +3070,7 @@ def cmd_search(args):
            "things3": "\033[93m[things3]", "fyr": "\033[91m[fyr]",
            "screenshot": "\033[96m[shot]", "git_commit": "\033[92m[commit]",
            "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]", "facebook": "\033[35m[fb]",
-           "ruby": "\033[91m[ruby]", "chat": "\033[35m[chat]"}
+           "ruby": "\033[91m[ruby]", "chat": "\033[35m[chat]", "link": "\033[36m[link]"}
     for i, x in enumerate(ranked, 1):
         r = x["r"]
         kw = " \033[32m[kw]\033[0m" if x["kw"] else ""
@@ -3196,7 +3239,7 @@ def _scope(args):
     flags = []
     for k in ("session", "doc", "messenger", "aichat", "note", "email",
               "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup", "ruby",
-              "chat", "facebook"):
+              "chat", "facebook", "link"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
@@ -3247,6 +3290,8 @@ def _add_search_args(sp):
     sp.add_argument("--chat", action="store_true",
                     help="Skype (2012-2018) and Adium (ICQ, Google Talk, MSN, Facebook chat, IRC; "
                          "2010-2011), one source per conversation per day")
+    sp.add_argument("--links", dest="link", action="store_true",
+                    help="links he saved instead of keeping tabs open (the lankar inbox, from 2026-11-08)")
     sp.add_argument("--ruby", action="store_true",
                     help="what Fredrik said to Ruby, the voice assistant, and what she answered "
                          "(from 2026-01-16)")

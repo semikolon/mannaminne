@@ -412,6 +412,51 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIn("https://example.org/", posts[6])
         self.assertIn("Får jag dela vidare", by_sid["facebook:comments:2016-05-28"][6])
 
+    def test_discover_links_one_source_per_link_with_its_text(self):
+        # Copied from ~/Projects/lankar/links.jsonl (the 2026-11-08 Zen import), two public GitHub
+        # pages, one saved twice; the space and folder names are replaced, since this repository
+        # is public.
+        import tempfile
+        lines = [
+            {"id": "13129c3b3d3e", "url": "https://github.com/justLV/onju-voice",
+             "title": "onju-voice: A hackable AI home assistant platform",
+             "saved_at": "2026-11-08T16:16:00+01:00", "via": "zen-import", "browser": "zen",
+             "context": "Zen: SPACE / FOLDER / pinned"},
+            {"id": "2506ef54f9f8", "url": "https://github.com/MiguelsPizza/WebMCP?utm_source=tldrwebdev",
+             "title": "MiguelsPizza/WebMCP: Bringing the power of MCP to the web",
+             "saved_at": "2026-11-08T16:16:00+01:00", "via": "zen-import", "browser": "zen",
+             "context": "Zen: SPACE / pinned"},
+            {"id": "13129c3b3d3e", "url": "https://github.com/justLV/onju-voice", "title": "",
+             "saved_at": "2026-11-09T09:30:00+01:00", "via": "save-key", "browser": "Google Chrome",
+             "context": ""},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "links.jsonl").write_text(
+                "\n".join(json.dumps(x) for x in lines) + "\nnot json\n", encoding="utf-8")
+            Path(d, "text").mkdir()
+            Path(d, "text", "13129c3b3d3e.txt").write_text(
+                "Onju Voice is a hackable AI home assistant platform.", encoding="utf-8")
+            old_fp = m._FINGERPRINT_FILE
+            m._FINGERPRINT_FILE = str(Path(d) / "fp.json")
+            try:
+                with mock.patch.dict(os.environ, {"MANNAMINNE_LINKS_DIR": d}):
+                    rows = list(m.discover_links())
+            finally:
+                m._FINGERPRINT_FILE = old_fp
+                m._PENDING_FINGERPRINTS.pop("link", None)
+        by_sid = {}
+        for r in rows:
+            by_sid.setdefault(r[2], []).append(r)
+        self.assertEqual(set(by_sid), {"link:13129c3b3d3e", "link:2506ef54f9f8"})
+        onju = by_sid["link:13129c3b3d3e"][0]
+        self.assertEqual((onju[1], onju[4]), ("link", "lankar"))
+        self.assertEqual((onju[7], onju[8]), ("2026-11-08", "2026-11-09"))   # first save, last save
+        self.assertEqual(onju[5], "onju-voice: A hackable AI home assistant platform")  # an empty title keeps the old
+        self.assertIn("https://github.com/justLV/onju-voice", onju[6])
+        self.assertIn("zen, Google Chrome", onju[6])
+        self.assertIn("hackable AI home assistant platform.", onju[6])   # the page text
+        self.assertNotIn("\n\n", by_sid["link:2506ef54f9f8"][0][6])      # no text fetched, no body
+
     def test_discover_ruby_one_source_per_thread_with_both_voices(self):
         # Copied from ~/.claude/logs/ruby_conversations.jsonl (the first line, a backfill whose
         # reply was kept only as a size note, and the 2026-07-03 bedroom test), chosen because
