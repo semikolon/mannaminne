@@ -923,12 +923,10 @@ def discover_docs():
         if f not in seen and not any(x in f for x in _DOC_EXCLUDE):
             files.append((projects, "repo", f))
     _skip_if_unchanged("doc", [f for _, _, f in files])
+    stored = _stored_sources("doc")
     for base, mode, f in files:
         if True:
             if any(x in f for x in _DOC_EXCLUDE):
-                continue
-            if _is_dataless(f):
-                print(f"doc: skipping dataless iCloud placeholder {f}", file=sys.stderr)
                 continue
             # project/rel are computed BEFORE the file is read so the per-file skip
             # can avoid the read, the chunking and the upsert, not just the last of them.
@@ -945,7 +943,16 @@ def discover_docs():
             else:
                 project = Path(f).relative_to(base).parts[0]
             rel = os.path.relpath(f, base)
-            if _unchanged("doc", f, source_id=f"doc:{project}:{rel}"):
+            if _is_dataless(f):
+                # Reading an iCloud placeholder downloads it, so it is not read here. Its chunks from
+                # when it was on disk are kept: until 2026-11-08 a note offloaded after indexing was
+                # pruned from the index at the next run.
+                _CARRIED_SOURCES.setdefault("doc", set()).add(f"doc:{project}:{rel}")
+                continue
+            # A file counts as done only if its chunks are really stored: on 2026-11-08, 34 notes in
+            # ~/Documents had a fingerprint from an earlier run and no chunks at all, so every night
+            # skipped them as unchanged (how the chunks went missing was not found).
+            if _unchanged("doc", f, source_id=f"doc:{project}:{rel}") and f"doc:{project}:{rel}" in stored:
                 continue
             try:
                 if os.path.getsize(f) > 600_000:
@@ -1126,6 +1133,25 @@ def _unchanged(kind, path, source_id=None, project=None, _fps_cache={}):
     if project:
         _CARRIED_PROJECTS.setdefault(kind, set()).add(project)
     return True
+
+
+def _stored_sources(kind):
+    """Every source id of `kind` that has chunks in the index, one query. On any failure the set
+    holds everything, so the per-file skip behaves as before rather than re-reading the corpus."""
+    class _All(set):
+        def __contains__(self, _):
+            return True
+    try:
+        conn = load_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT source_id FROM chunks WHERE source_kind = %s", [kind])
+                return {r[0] for r in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  {kind}: could not list stored sources ({e}); per-file skip unchecked", file=sys.stderr)
+        return _All()
 
 
 def _volume_available(path: str) -> bool:
