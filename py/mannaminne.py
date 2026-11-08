@@ -598,6 +598,121 @@ def discover_chat():
         yield from _rows("chat", f"chat:skype:{ident}:{day}", "skype", title, full, day)
 
 
+#: Beeper's local index: every network it bridges (Messenger, WhatsApp, Signal, Instagram, Discord),
+#: since he started using it. Added 2026-11-08 at his word ("I thought that it was already integrated
+#: and synced"): the June plan named Beeper as the Messenger gap-fill and it was never built. It is
+#: what holds encrypted one-to-one Messenger chats (Meta's download stops where a chat turned
+#: encrypted) and every network that is not Messenger.
+BEEPER_INDEX = os.path.join(HOME, "Library/Application Support/BeeperTexts/index.db")
+_BEEPER_NETWORK = {"facebookgo": "messenger", "whatsapp": "whatsapp", "signal": "signal",
+                   "instagramgo": "instagram", "discordgo": "discord", "telegram": "telegram",
+                   "linkedin": "linkedin", "twitter": "x", "imessage": "imessage", "sms": "sms",
+                   "gmessages": "sms", "slackgo": "slack", "googlechat": "google-chat"}
+_BEEPER_SKIP = ("hungryserv",)    # Beeper's own Matrix server: its community rooms, no contact of his
+
+
+def _beeper_copy(src, into):
+    """The index is live SQLite in WAL mode: copy the log first, then the database (as beeper-read
+    does), so a checkpoint between the copies cannot lay an empty log over an old database."""
+    dst = os.path.join(into, "index.db")
+    if os.path.exists(src + "-wal"):
+        shutil.copy2(src + "-wal", dst + "-wal")
+    shutil.copy2(src, dst)
+    return dst
+
+
+def _messenger_said_days():
+    """{(day, text)} of every message in the Facebook downloads, so a Beeper Messenger message the
+    download already holds is not indexed twice. Matched on day and words, not on chat names,
+    which Beeper leaves empty for one-to-one chats and people change."""
+    from zoneinfo import ZoneInfo
+    import datetime as _dt
+    tz, said = ZoneInfo("Europe/Stockholm"), set()
+    threads, _ = _messenger_threads()
+    for d, _tid in threads:
+        for f in glob.glob(os.path.join(d, "message_*.json")):
+            try:
+                with open(f) as fh:
+                    j = json.load(fh)
+            except Exception:
+                continue
+            for m in j.get("messages", []):
+                c, ts = m.get("content"), m.get("timestamp_ms")
+                if c and ts:
+                    day = _dt.datetime.fromtimestamp(ts / 1000, tz).strftime("%Y-%m-%d")
+                    said.add((day, " ".join(fix_mojibake(c).split())))
+    return said
+
+
+def _beeper_days(con, known=frozenset()):
+    """{(room, day): [(ts, 'HH:MM name', text)]}, each room's title and network. Text lives in the
+    full-text table's c0, joined on rowid; mx_room_messages.text_content is empty (beeper-read)."""
+    from zoneinfo import ZoneInfo
+    import datetime as _dt
+    tz = ZoneInfo("Europe/Stockholm")
+    rooms = {}
+    for tid, acct, raw in con.execute("SELECT threadID, accountID, thread FROM threads"):
+        if not acct or acct.startswith("$") or acct.split(".")[0] in _BEEPER_SKIP:
+            continue
+        try:
+            t = json.loads(raw)
+        except (TypeError, ValueError):
+            t = {}
+        rooms[tid] = {"network": _BEEPER_NETWORK.get(acct.split(".")[0], acct.split(".")[0]),
+                      "title": (t.get("title") or "").strip(), "type": t.get("type")}
+    names = {}
+    for room, pid, full, is_self in con.execute(
+            "SELECT room_id, id, full_name, is_self FROM participants"):
+        if full and not is_self:
+            names[(room, pid)] = full.strip()
+    days, others = {}, {}
+    for room, ts, mine, sender, text in con.execute(
+            "SELECT m.roomID, m.timestamp, m.isSentByMe, m.senderContactID, f.c0 "
+            "FROM mx_room_messages m JOIN mx_room_messages_fts_content f ON f.rowid = m.rowid "
+            "WHERE m.isDeleted = 0 AND m.type = 'TEXT' ORDER BY m.timestamp"):
+        if room not in rooms or not text or not ts:
+            continue
+        text = " ".join(str(text).split())
+        d = _dt.datetime.fromtimestamp(ts / 1000, tz)
+        day = d.strftime("%Y-%m-%d")
+        if rooms[room]["network"] == "messenger" and (day, text) in known:
+            continue
+        who = "Fredrik Bränström" if mine else names.get((room, sender), "") or "?"
+        if not mine and who != "?":
+            others.setdefault(room, {})
+            others[room][who] = others[room].get(who, 0) + 1
+        days.setdefault((room, day), []).append((ts, f"{d.strftime('%H:%M')} {who}", text))
+    for room, r in rooms.items():
+        if not r["title"]:
+            people = sorted(others.get(room, {}), key=lambda n: -others[room][n])
+            r["title"] = ", ".join(people[:4]) or room
+    return days, rooms
+
+
+def discover_beeper():
+    """One source per conversation per day from Beeper's local index, read from a copy."""
+    src = os.environ.get("MANNAMINNE_BEEPER_INDEX", BEEPER_INDEX)
+    if not os.path.exists(src):
+        return
+    _skip_if_unchanged("beeper", [p for p in (src, src + "-wal") if os.path.exists(p)])
+    import sqlite3, tempfile
+    known = _messenger_said_days()
+    tmp = tempfile.mkdtemp(prefix="mannaminne-beeper-")
+    try:
+        con = sqlite3.connect(_beeper_copy(src, tmp))
+        try:
+            days, rooms = _beeper_days(con, known)
+        finally:
+            con.close()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    for (room, day), msgs in sorted(days.items()):
+        r = rooms[room]
+        title = f"{r['network'].capitalize()} · {r['title']} · {day}"
+        full = title + "\n" + "\n".join(f"{who}: {text}" for _, who, text in msgs)
+        yield from _rows("beeper", f"beeper:{room}:{day}", r["network"], title, full, day)
+
+
 #: Ruby, the voice assistant in the TTS daemon, logs every exchange here: what Fredrik said and
 #: what she answered, from 2026-01-16. Added 2026-10-23 at his request ("It should. It could also
 #: index her replies."), because nothing else in the index holds what he said aloud.
@@ -2029,7 +2144,7 @@ ALL = {"messenger": discover_messenger, "aichat": discover_aichat,
        "screenshot": discover_screenshots, "git_commit": discover_git_commits,
        "code": discover_code, "said": discover_said, "fbgroup": discover_fbgroup,
        "ruby": discover_ruby, "chat": discover_chat, "facebook": discover_facebook,
-       "link": discover_links}
+       "link": discover_links, "beeper": discover_beeper}
 
 # --- ingest -----------------------------------------------------------------
 
@@ -3072,7 +3187,8 @@ def cmd_search(args):
            "things3": "\033[93m[things3]", "fyr": "\033[91m[fyr]",
            "screenshot": "\033[96m[shot]", "git_commit": "\033[92m[commit]",
            "code": "\033[94m[code]", "fbgroup": "\033[35m[fbgroup]", "facebook": "\033[35m[fb]",
-           "ruby": "\033[91m[ruby]", "chat": "\033[35m[chat]", "link": "\033[36m[link]"}
+           "ruby": "\033[91m[ruby]", "chat": "\033[35m[chat]", "link": "\033[36m[link]",
+           "beeper": "\033[35m[beeper]"}
     for i, x in enumerate(ranked, 1):
         r = x["r"]
         kw = " \033[32m[kw]\033[0m" if x["kw"] else ""
@@ -3241,7 +3357,7 @@ def _scope(args):
     flags = []
     for k in ("session", "doc", "messenger", "aichat", "note", "email",
               "things3", "fyr", "screenshot", "git_commit", "code", "said", "fbgroup", "ruby",
-              "chat", "facebook", "link"):
+              "chat", "facebook", "link", "beeper"):
         if getattr(args, k, False):
             flags.append(k)
     if flags:
@@ -3292,6 +3408,10 @@ def _add_search_args(sp):
     sp.add_argument("--chat", action="store_true",
                     help="Skype (2012-2018) and Adium (ICQ, Google Talk, MSN, Facebook chat, IRC; "
                          "2010-2011), one source per conversation per day")
+    sp.add_argument("-b", "--beeper", action="store_true",
+                    help="chats in Beeper: Messenger (encrypted one-to-one chats and anything newer than "
+                         "the Facebook download), WhatsApp, Signal, Instagram, Discord; one source per "
+                         "conversation per day (from 2026-11-08)")
     sp.add_argument("--links", dest="link", action="store_true",
                     help="links he saved instead of keeping tabs open (the lankar inbox, from 2026-11-08)")
     sp.add_argument("--ruby", action="store_true",
