@@ -3061,6 +3061,8 @@ def cmd_search(args):
                 "sem": round(x["sem"], 3),
                 "kw": bool(x["kw"]),
                 "snippet": (r[4] or "").replace("\n", " ")[:500],
+                # The chunk's id names the thing to open: a note's path, a session's id, a commit (2026-11-08).
+                "id": r[0],
             }, ensure_ascii=False))
         return
     if not ranked:
