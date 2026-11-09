@@ -896,15 +896,39 @@ def _walk_docs(base, suffixes):
 
 
 def _pdf_text(path, limit=600_000):
-    """The text layer of a PDF, read with poppler's `pdftotext` (in ~/.Brewfile).
-    A scan with no text layer returns "" and is skipped by the caller; those need OCR,
-    which is not built (~/dotfiles/TODO.md). Pages are joined with a blank line in
-    place of the form feed, so chunk_markdown splits on them like paragraphs."""
-    exe = shutil.which("pdftotext") or "/opt/homebrew/bin/pdftotext"
-    out = subprocess.run([exe, "-layout", "-enc", "UTF-8", path, "-"], capture_output=True,
-                         timeout=120).stdout.decode("utf-8", errors="replace")
+    """The text of a PDF: its text layer, read with poppler's `pdftotext` (in ~/.Brewfile), or for
+    a scan with under 40 characters a page, Apple Vision OCR (ocrmac, as for screenshots) on each
+    page rendered at 200 dpi with `pdftoppm`. Swedish is preferred, then English. Pages are joined
+    with a blank line, so chunk_markdown splits on them like paragraphs. On 2026-11-09, 324 of 333
+    PDFs in ~/Documents had a text layer; the other 11 (37 pages) are read by OCR."""
+    poppler = lambda name: shutil.which(name) or f"/opt/homebrew/bin/{name}"
+    out = subprocess.run([poppler("pdftotext"), "-layout", "-enc", "UTF-8", path, "-"],
+                         capture_output=True, timeout=120).stdout.decode("utf-8", errors="replace")
+    pages = out.count("\f") or 1
+    if len(out.strip()) < 40 * pages:
+        out = _pdf_ocr(path, poppler("pdftoppm")) or out
     out = re.sub(r"[ \t]{3,}", "  ", out.replace("\f", "\n\n"))
     return out[:limit]
+
+
+def _pdf_ocr(path, pdftoppm, max_pages=60):
+    import tempfile
+    try:
+        from ocrmac import ocrmac
+    except Exception:
+        return ""
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run([pdftoppm, "-r", "200", "-png", "-l", str(max_pages), path, f"{tmp}/p"],
+                       capture_output=True, timeout=300)
+        pages = []
+        for img in sorted(Path(tmp).glob("p*.png")):
+            try:
+                res = ocrmac.OCR(str(img), framework="vision",
+                                 language_preference=["sv-SE", "en-US"]).recognize()
+            except Exception:
+                continue
+            pages.append("\n".join(t for t, _c, _b in res))
+    return "\n\n".join(pages)
 
 
 def discover_docs():
@@ -913,8 +937,8 @@ def discover_docs():
         (Path(HOME) / "dotfiles", (".md",), "dotfiles"),
         # Personal writing outside any repo: kollektiv-applications, the Obsidian
         # vault, the Craft journal, KK-Utflytt, creative-projects, IRC logs.
-        # PDFs since 2026-11-09: letters, statements, decisions and receipts (334 files,
-        # 10 of them scans with no text layer, which yield nothing until OCR is added).
+        # PDFs since 2026-11-09: letters, statements, decisions and receipts (334 files;
+        # scans without a text layer are read by OCR, see _pdf_text).
         (Path(HOME) / "Documents", (".md", ".txt", ".pdf"), "documents"),
         # iCloud Drive proper (the 2014 mackup backup under it is excluded).
         (Path(HOME) / "Library/Mobile Documents/com~apple~CloudDocs", (".md",), "icloud"),
