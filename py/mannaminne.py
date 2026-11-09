@@ -895,13 +895,27 @@ def _walk_docs(base, suffixes):
                     yield full
 
 
+def _pdf_text(path, limit=600_000):
+    """The text layer of a PDF, read with poppler's `pdftotext` (in ~/.Brewfile).
+    A scan with no text layer returns "" and is skipped by the caller; those need OCR,
+    which is not built (~/dotfiles/TODO.md). Pages are joined with a blank line in
+    place of the form feed, so chunk_markdown splits on them like paragraphs."""
+    exe = shutil.which("pdftotext") or "/opt/homebrew/bin/pdftotext"
+    out = subprocess.run([exe, "-layout", "-enc", "UTF-8", path, "-"], capture_output=True,
+                         timeout=120).stdout.decode("utf-8", errors="replace")
+    out = re.sub(r"[ \t]{3,}", "  ", out.replace("\f", "\n\n"))
+    return out[:limit]
+
+
 def discover_docs():
     # (root, suffixes, project-label-mode)
     walks = [
         (Path(HOME) / "dotfiles", (".md",), "dotfiles"),
         # Personal writing outside any repo: kollektiv-applications, the Obsidian
         # vault, the Craft journal, KK-Utflytt, creative-projects, IRC logs.
-        (Path(HOME) / "Documents", (".md", ".txt"), "documents"),
+        # PDFs since 2026-11-09: letters, statements, decisions and receipts (334 files,
+        # 10 of them scans with no text layer, which yield nothing until OCR is added).
+        (Path(HOME) / "Documents", (".md", ".txt", ".pdf"), "documents"),
         # iCloud Drive proper (the 2014 mackup backup under it is excluded).
         (Path(HOME) / "Library/Mobile Documents/com~apple~CloudDocs", (".md",), "icloud"),
     ]
@@ -955,9 +969,12 @@ def discover_docs():
             if _unchanged("doc", f, source_id=f"doc:{project}:{rel}") and f"doc:{project}:{rel}" in stored:
                 continue
             try:
-                if os.path.getsize(f) > 600_000:
-                    continue
-                content = open(f, encoding="utf-8", errors="replace").read()
+                if f.lower().endswith(".pdf"):
+                    content = _pdf_text(f)
+                else:
+                    if os.path.getsize(f) > 600_000:
+                        continue
+                    content = open(f, encoding="utf-8", errors="replace").read()
             except Exception:
                 continue
             if not content.strip():
