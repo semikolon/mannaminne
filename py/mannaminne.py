@@ -1921,7 +1921,9 @@ def discover_links():
     _skip_if_unchanged("link", [str(path)] + ([str(marks_path)] if marks_path.exists() else [])
                        + [str(t) for t in texts])
     # His verdicts (lankar `mark`, ruled 2026-11-10): a hidden or gone link leaves search. Not emitting it
-    # is enough: the orphan prune deletes its chunks once this kind completes.
+    # is enough: the orphan prune deletes its chunks once this kind completes. A mark covers the saves made up
+    # to its time; the same page saved again later is searchable again (his word 2026-11-10).
+    from datetime import datetime
     marked = {}
     if marks_path.exists():
         for line in marks_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -1932,7 +1934,10 @@ def discover_links():
             if m.get("mark") == "shown":
                 marked.pop(m.get("id"), None)
             elif m.get("mark") in ("hidden", "gone"):
-                marked[m.get("id")] = m["mark"]
+                try:
+                    marked[m.get("id")] = datetime.fromisoformat(m.get("at")).timestamp()
+                except Exception:
+                    marked[m.get("id")] = float("inf")
     links = {}
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -1941,8 +1946,15 @@ def discover_links():
             except Exception:
                 continue
             lid = r.get("id")
-            if not lid or not r.get("url") or lid in marked:
+            if not lid or not r.get("url"):
                 continue
+            if lid in marked:
+                try:
+                    saved = datetime.fromisoformat(r.get("saved_at")).timestamp()
+                except Exception:
+                    saved = 0.0
+                if saved <= marked[lid]:
+                    continue
             cur = links.setdefault(lid, {"url": r["url"], "title": "", "first": r.get("saved_at", ""),
                                          "last": r.get("saved_at", ""), "contexts": [], "browsers": []})
             cur["title"] = r.get("title") or cur["title"]
