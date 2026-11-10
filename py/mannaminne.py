@@ -1917,7 +1917,22 @@ def discover_links():
     if not path.exists():
         return
     texts = sorted((base / "text").glob("*.txt")) if (base / "text").exists() else []
-    _skip_if_unchanged("link", [str(path)] + [str(t) for t in texts])
+    marks_path = base / "marks.jsonl"
+    _skip_if_unchanged("link", [str(path)] + ([str(marks_path)] if marks_path.exists() else [])
+                       + [str(t) for t in texts])
+    # His verdicts (lankar `mark`, ruled 2026-11-10): a hidden or gone link leaves search. Not emitting it
+    # is enough: the orphan prune deletes its chunks once this kind completes.
+    marked = {}
+    if marks_path.exists():
+        for line in marks_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                m = json.loads(line)
+            except Exception:
+                continue
+            if m.get("mark") == "shown":
+                marked.pop(m.get("id"), None)
+            elif m.get("mark") in ("hidden", "gone"):
+                marked[m.get("id")] = m["mark"]
     links = {}
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -1926,7 +1941,7 @@ def discover_links():
             except Exception:
                 continue
             lid = r.get("id")
-            if not lid or not r.get("url"):
+            if not lid or not r.get("url") or lid in marked:
                 continue
             cur = links.setdefault(lid, {"url": r["url"], "title": "", "first": r.get("saved_at", ""),
                                          "last": r.get("saved_at", ""), "contexts": [], "browsers": []})
