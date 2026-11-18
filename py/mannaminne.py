@@ -956,6 +956,11 @@ def discover_docs():
     # The life repo keeps its documents in area folders (hem/, boende/, myndigheter/
     # and so on), not in docs/, so it is walked whole (2026-11-04,
     # ~/dotfiles/docs/where_things_live_2026-11-04.md). Labelled like any repo.
+    # His spoken notes from the phone's Action Button (2026-11-18), which Fyr keeps in ~/.fyr/captures. The
+    # folder is hidden, so the walker's dot-pruning and the "/." exclusion would skip it; added by name.
+    voice = Path(HOME) / ".fyr" / "captures"
+    if voice.is_dir():
+        files.extend((voice, "voice", str(f)) for f in sorted(voice.glob("*.md")))
     seen = {f for _, _, f in files}
     for f in _walk_docs(projects / "tillvaro", (".md",)):
         if f not in seen and not any(x in f for x in _DOC_EXCLUDE):
@@ -964,7 +969,7 @@ def discover_docs():
     stored = _stored_sources("doc")
     for base, mode, f in files:
         if True:
-            if any(x in f for x in _DOC_EXCLUDE):
+            if mode != "voice" and any(x in f for x in _DOC_EXCLUDE):
                 continue
             # project/rel are computed BEFORE the file is read so the per-file skip
             # can avoid the read, the chunking and the upsert, not just the last of them.
@@ -972,6 +977,8 @@ def discover_docs():
                 project = "dotfiles"
             elif mode == "icloud":
                 project = "icloud"
+            elif mode == "voice":
+                project = "voice"
             elif mode == "documents":
                 # First path segment is the folder (kollektiv-applications,
                 # KK-Utflytt, Obsidian Vault); a loose file at the root gets a

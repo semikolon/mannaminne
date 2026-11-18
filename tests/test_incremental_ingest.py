@@ -322,3 +322,19 @@ class TestDiscovererIntegration:
         assert any("one.md" in s for s in emitted), "the edited document was not re-read"
         assert not any("two.md" in s for s in emitted), "an untouched document was re-read"
         assert any("two.md" in s for s in mm._CARRIED_SOURCES["doc"])
+
+
+def test_spoken_notes_in_fyrs_hidden_folder_are_indexed(tmp_path, monkeypatch):
+    # 2026-11-18: spoken notes from the phone live in ~/.fyr/captures, and the "/." exclusion kept them out of
+    # search, so a note could not be found again by its topic.
+    home = tmp_path / "home"
+    for d in ("dotfiles", "Documents", "Library/Mobile Documents/com~apple~CloudDocs", "Projects", ".fyr/captures"):
+        (home / d).mkdir(parents=True)
+    (home / ".fyr/captures/2026-11-17-2341-batterier.md").write_text(
+        "---\nsource: voice\ntranscriber: superwhisper-scribe\n---\n\n# Köp batterier\n\n## Transkribering\n\n"
+        "Kom ihåg att köpa batterier.\n", encoding="utf-8")
+    (home / ".fyr/other.md").write_text("# not a capture\n", encoding="utf-8")
+    monkeypatch.setattr(mm, "HOME", str(home))
+    ids = {r[2] for r in mm.discover_docs()}
+    assert "doc:voice:2026-11-17-2341-batterier.md" in ids, ids
+    assert not any("other.md" in i for i in ids)
