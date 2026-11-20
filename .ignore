@@ -1,0 +1,2 @@
+# ripgrep reads this before .gitignore: search the private notes folder, which git ignores.
+!/private/

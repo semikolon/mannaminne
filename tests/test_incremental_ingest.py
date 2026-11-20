@@ -352,3 +352,15 @@ def test_a_repos_private_notes_folder_is_indexed_once(tmp_path, monkeypatch):
     ids = [r[2] for r in mm.discover_docs()]
     hits = [i for i in ids if "note.md" in i]
     assert len(hits) == 1, ids
+
+
+def test_a_linked_note_is_indexed_where_it_lives(tmp_path, monkeypatch):
+    # 2026-11-20: mannaminne's own notes moved from dotfiles/docs into mannaminne/private, links left behind.
+    home = tmp_path / "home"
+    for d in ("dotfiles/docs", "Documents", "Library/Mobile Documents/com~apple~CloudDocs", "Projects/mannaminne/private"):
+        (home / d).mkdir(parents=True)
+    (home / "Projects/mannaminne/private/ops.md").write_text("# Operations\n\nText.\n", encoding="utf-8")
+    (home / "dotfiles/docs/ops.md").symlink_to("../../Projects/mannaminne/private/ops.md")
+    monkeypatch.setattr(mm, "HOME", str(home))
+    hits = [r[2] for r in mm.discover_docs() if "ops.md" in r[2]]
+    assert len(hits) == 1 and "private" in hits[0], hits

@@ -7,3 +7,6 @@ __pycache__/
 
 # Session-local Claude Code state (tier2 analyses reference fleet/personal context — public repo)
 .claude/
+# Notes not for outsiders (his precedent 2026-11-20); its own private repo, mannaminne-private
+private/
+.private

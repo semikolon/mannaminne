@@ -891,7 +891,9 @@ def _walk_docs(base, suffixes):
         for fn in files:
             if fn.endswith(suffixes):
                 full = os.path.join(root, fn)
-                if not any(x in full for x in _DOC_EXCLUDE):
+                # A link points at a note indexed where it lives (dotfiles' mannaminne notes link into
+                # mannaminne/private since 2026-11-20); reading it here too would index it twice.
+                if not any(x in full for x in _DOC_EXCLUDE) and not os.path.islink(full):
                     yield full
 
 
