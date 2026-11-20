@@ -338,3 +338,17 @@ def test_spoken_notes_in_fyrs_hidden_folder_are_indexed(tmp_path, monkeypatch):
     ids = {r[2] for r in mm.discover_docs()}
     assert "doc:voice:2026-11-17-2341-batterier.md" in ids, ids
     assert not any("other.md" in i for i in ids)
+
+
+def test_a_repos_private_notes_folder_is_indexed_once(tmp_path, monkeypatch):
+    # 2026-11-20: Deliberus's private notes moved from .private/ (skipped by every search) to private/, with
+    # .private left as a link; the notes are indexed, once, under the real folder.
+    home = tmp_path / "home"
+    for d in ("dotfiles", "Documents", "Library/Mobile Documents/com~apple~CloudDocs", "Projects/proj/private/drafts"):
+        (home / d).mkdir(parents=True)
+    (home / "Projects/proj/private/drafts/note.md").write_text("# A private note\n\nText.\n", encoding="utf-8")
+    (home / "Projects/proj/.private").symlink_to("private")
+    monkeypatch.setattr(mm, "HOME", str(home))
+    ids = [r[2] for r in mm.discover_docs()]
+    hits = [i for i in ids if "note.md" in i]
+    assert len(hits) == 1, ids

@@ -949,7 +949,9 @@ def discover_docs():
     # (as before) plus its ROOT-level .md, the class that left fyr's
     # high-level-graph-view.md and voice_architecture_session.md unfindable.
     projects = Path(HOME) / "Projects"
-    for pat in ("*/docs/**/*.md", "*/*.md"):
+    # Plus each repo's private/ notes folder (gitignored there; renamed from .private on 2026-11-20 so every
+    # search sees it, his ask: "I'd like a unified system").
+    for pat in ("*/docs/**/*.md", "*/*.md", "*/private/**/*.md"):
         for f in glob.glob(str(projects / pat), recursive=True):
             if not any(x in f for x in _DOC_EXCLUDE):
                 files.append((projects, "repo", f))
